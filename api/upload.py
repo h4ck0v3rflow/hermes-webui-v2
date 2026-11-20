@@ -42,12 +42,12 @@ def _max_extracted_bytes() -> int:
                 return int(mb * 1024 * 1024)
         except ValueError:
             pass
-    return 10 * MAX_UPLOAD_BYTES
+    return 200 * 1024 * 1024
 
 
 # Back-compat module constant (some call sites / tests reference it). The
 # authoritative value is _max_extracted_bytes(), read at extraction time.
-_MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
+_MAX_EXTRACTED_BYTES = 200 * 1024 * 1024
 
 # Member-count cap: a tiny archive with millions of (possibly empty) members
 # slips under the byte cap but can exhaust inodes / file descriptors. Bound it.
@@ -146,7 +146,7 @@ def parse_multipart(rfile, content_type, content_length) -> tuple:
     try:
         from api.config import MAX_UPLOAD_BYTES as _MAX_UPLOAD_BYTES
     except Exception:
-        _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+        _MAX_UPLOAD_BYTES = 100 * 1024 * 1024
     m = _re.search(r'boundary=([^;\s]+)', content_type)
     if not m:
         raise ValueError('No boundary in Content-Type')
