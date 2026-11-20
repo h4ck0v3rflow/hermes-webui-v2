@@ -79,6 +79,7 @@ from api.shares import (
     revoke_share_owned_by,
     write_share_snapshot,
 )
+from api.cockpit.routes import handle_cockpit_delete, handle_cockpit_get, handle_cockpit_post  # cockpit seam
 
 logger = logging.getLogger(__name__)
 
@@ -18168,6 +18169,8 @@ def handle_get(handler, parsed) -> bool:
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
+    if handle_cockpit_get(handler, parsed):
+        return True
 
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
@@ -19981,6 +19984,10 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return proxy_result
+    if handle_cockpit_post(handler, parsed):
+        if diag:
+            diag.finish()
+        return True
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
@@ -24023,6 +24030,8 @@ def handle_delete(handler, parsed) -> bool:
     )
     if proxy_result is not False:
         return proxy_result
+    if handle_cockpit_delete(handler, parsed):
+        return True
     try:
         body = read_body(handler)
     except ValueError as exc:

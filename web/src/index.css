@@ -1,0 +1,63 @@
+@import "tailwindcss/theme.css";
+@import "tailwindcss/utilities.css";
+
+@theme {
+  --color-rail: #090b0e;
+  --color-canvas: #0d1015;
+  --color-surface: #12151c;
+  --color-elevated: #171b24;
+  --color-elevated-hover: #1d222e;
+  --color-border-subtle: rgba(255, 255, 255, 0.08);
+  --color-text-primary: #f8fafc;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #7e899a;
+  --color-accent: #10b981;
+  --color-warn: #f59e0b;
+  --color-danger: #ef4444;
+  --color-info: #3b82f6;
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@layer base {
+  #cockpit-extra-tabs-root,
+  #cockpit-extra-tabs-root *,
+  #cockpit-extra-tabs-root *::before,
+  #cockpit-extra-tabs-root *::after {
+    box-sizing: border-box;
+    border-color: var(--oh-border, rgba(255, 255, 255, 0.08));
+  }
+
+  #cockpit-extra-tabs-root button,
+  #cockpit-extra-tabs-root input,
+  #cockpit-extra-tabs-root textarea,
+  #cockpit-extra-tabs-root select {
+    font: inherit;
+    color: inherit;
+    background-color: transparent;
+    border-width: 0;
+    border-style: solid;
+    outline: none;
+  }
+}
+
+/* Bridge OpenHands tab tokens to Hermes WebUI's active theme/skin */
+#cockpit-extra-tabs-root {
+  --oh-canvas: var(--bg, #0d1015);
+  --oh-surface: var(--sidebar, #12151c);
+  --oh-elevated: var(--surface, #171b24);
+  --oh-border: var(--border, rgba(255, 255, 255, 0.08));
+  --oh-text: var(--text, #f8fafc);
+  --oh-muted: var(--muted, #94a3b8);
+  --oh-accent: var(--accent, #10b981);
+  font-family: var(--font-sans);
+}
+
+@keyframes ohFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

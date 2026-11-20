@@ -15566,6 +15566,12 @@ def _run_agent_streaming(
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
+                    if name and str(name).startswith('browser_'):
+                        try:
+                            from api.cockpit.browser import mirror_browser_tool_event
+                            mirror_browser_tool_event(getattr(s, 'session_id', None) or session_id, name, args)
+                        except Exception:
+                            pass
                     # Fallback: poll for pending approval in case notify_cb wasn't
                     # registered (e.g. older approval module without gateway support).
                     try:
@@ -15654,6 +15660,12 @@ def _run_agent_streaming(
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
+                    if name and str(name).startswith('browser_'):
+                        try:
+                            from api.cockpit.browser import mirror_browser_tool_event
+                            mirror_browser_tool_event(getattr(s, 'session_id', None) or session_id, name, args)
+                        except Exception:
+                            pass
                     return
 
             def on_tool_start(tool_call_id, name, args):
@@ -15686,10 +15698,28 @@ def _run_agent_streaming(
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
                         })
+                        if name in ('terminal', 'process', 'execute_code'):
+                            try:
+                                from api.cockpit.cmd import mirror_cmd_tool_event
+                                mirror_cmd_tool_event(
+                                    getattr(s, 'session_id', None) or session_id,
+                                    tool_call_id,
+                                    name,
+                                    args,
+                                    is_start=True,
+                                )
+                            except Exception:
+                                pass
                     _tool_stats = meter().get_stats(stream_id)
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
+                    if name and str(name).startswith('browser_'):
+                        try:
+                            from api.cockpit.browser import mirror_browser_tool_event
+                            mirror_browser_tool_event(getattr(s, 'session_id', None) or session_id, name, args)
+                        except Exception:
+                            pass
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool start', exc_info=True)
 
@@ -15737,10 +15767,40 @@ def _run_agent_streaming(
                             session_id=session_id,
                             stream_id=stream_id,
                         )
+                        if name and str(name).startswith('browser_'):
+                            try:
+                                from api.cockpit.browser import mirror_browser_tool_event
+                                mirror_browser_tool_event(
+                                    getattr(s, 'session_id', None) or session_id,
+                                    name,
+                                    args,
+                                    function_result=function_result,
+                                )
+                            except Exception:
+                                pass
+                        elif name in ('terminal', 'process', 'execute_code'):
+                            try:
+                                from api.cockpit.cmd import mirror_cmd_tool_event
+                                mirror_cmd_tool_event(
+                                    getattr(s, 'session_id', None) or session_id,
+                                    tool_call_id,
+                                    name,
+                                    args,
+                                    function_result=function_result,
+                                    is_start=False,
+                                )
+                            except Exception:
+                                pass
                     _tool_stats = meter().get_stats(stream_id)
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
+                    if name and str(name).startswith('browser_'):
+                        try:
+                            from api.cockpit.browser import mirror_browser_tool_event
+                            mirror_browser_tool_event(getattr(s, 'session_id', None) or session_id, name, args)
+                        except Exception:
+                            pass
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
                 try:

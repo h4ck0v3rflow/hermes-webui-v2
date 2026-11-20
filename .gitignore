@@ -84,3 +84,11 @@ docs/ui-ux/review-shots/
 # Local WebUI runtime data and credentials
 .webui_password
 attachments/
+
+# Cockpit v2 (see hermes-cockpit-antigravity-pack/COCKPIT.md)
+# Read-only reference clones (e.g. refs/OpenHands-main) â€” never committed.
+refs/
+# Vite build output of web/ â€” built on deploy (cd web && npm run build).
+static/v2/
+# The cockpit frontend lockfile IS tracked (root dev-tooling lockfile stays ignored).
+!web/package-lock.json
