@@ -362,7 +362,20 @@ def handle_browser_stream(handler, parsed) -> bool:
                     except queue.Empty:
                         break
 
-                bs = _hp_get_active_browser_session(pid)
+                # Observe only: the pane must not conjure a browser. It appears once the
+                # AGENT opens one for this session's profile (fresh, empty jar per session).
+                bs = _hp_get_active_browser_session(pid, _session_profile(sid))
+                if not bs and last_control_key != "no_browser":
+                    last_control_key = "no_browser"
+                    _sse(
+                        handler,
+                        "browser",
+                        {
+                            "t": "no_browser",
+                            "message": "The agent has not opened a browser in this session yet.",
+                            "ts": time.time(),
+                        },
+                    )
                 if bs:
                     bsid = str(bs.get("id") or bs.get("browser_session_id") or "")
                     cur_url = str(bs.get("url") or bs.get("current_url") or "")
@@ -387,15 +400,10 @@ def handle_browser_stream(handler, parsed) -> bool:
 
                     # Frame (send on change only, cap ~400 KB)
                     shot_res = _hp_browser_action(
-                        pid, bsid, {"action": "screenshot", "format": "jpeg", "max_bytes": 400_000}
+                        pid, bsid, {"type": "screenshot", "max_bytes": 400_000}
                     )
                     if isinstance(shot_res, dict):
-                        b64 = str(
-                            shot_res.get("jpeg_b64")
-                            or shot_res.get("screenshot_b64")
-                            or shot_res.get("data")
-                            or ""
-                        )
+                        b64 = _extract_frame_b64(shot_res)
                         if b64:
                             digest = hashlib.sha256(b64.encode("ascii", errors="ignore")).hexdigest()
                             if digest != last_frame_hash:
@@ -407,25 +415,30 @@ def handle_browser_stream(handler, parsed) -> bool:
                                     {
                                         "t": "frame",
                                         "jpeg_b64": b64,
+                                        "mime_type": str(((shot_res.get("data") or {}) if isinstance(shot_res.get("data"), dict) else {}).get("mime_type") or "image/png"),
                                         "url": frame_url,
                                         "ts": time.time(),
                                     },
                                 )
 
-                    # Open tabs (pages)
-                    pages_res = _hp_browser_action(pid, bsid, {"action": "pages", "op": "list"})
+                    # Open tabs (pages) — HuntProxy replies {ok, data:{pages[], runtime_generation}}
+                    pages_res = _hp_browser_action(pid, bsid, {"type": "pages", "op": "list"})
                     if isinstance(pages_res, dict):
-                        pages = pages_res.get("pages") or pages_res.get("tabs") or []
+                        pd_raw = pages_res.get("data")
+                        pages_data = pd_raw if isinstance(pd_raw, dict) else pages_res
+                        pages = pages_data.get("pages") or pages_data.get("tabs") or []
                         if isinstance(pages, list):
                             pk = json.dumps(pages, sort_keys=True)
                             if pk != last_pages_key:
                                 last_pages_key = pk
                                 _sse(handler, "browser", {"t": "pages", "pages": pages, "ts": time.time()})
 
-                    # Activity timeline events
-                    ev_res = _hp_browser_action(pid, bsid, {"action": "events", "limit": 20})
+                    # Activity timeline events — data:{events[], next_sequence, runtime_generation}
+                    ev_res = _hp_browser_action(pid, bsid, {"type": "events", "limit": 20})
                     if isinstance(ev_res, dict):
-                        ev_list = ev_res.get("events") or []
+                        ed_raw = ev_res.get("data")
+                        ev_data = ed_raw if isinstance(ed_raw, dict) else ev_res
+                        ev_list = ev_data.get("events") or []
                         if isinstance(ev_list, list):
                             for item in ev_list[-20:]:
                                 if not isinstance(item, dict):
@@ -436,8 +449,10 @@ def handle_browser_stream(handler, parsed) -> bool:
                                 seen_events.add(ev_key)
                                 if len(seen_events) > 200:
                                     seen_events.clear()
-                                kind = str(item.get("kind") or item.get("type") or "nav").lower()
-                                if kind not in ("nav", "dialog", "popup", "console"):
+                                kind = str(item.get("kind") or item.get("type") or "").lower()
+                                if kind not in ("nav", "navigation", "dialog", "popup", "console"):
+                                    continue  # request/other browser events are not timeline entries
+                                if kind in ("nav", "navigation"):
                                     kind = "nav"
                                 _sse(handler, "browser", {"t": kind, **item, "ts": time.time()})
 
@@ -480,7 +495,45 @@ def _hp_post_json(path: str, payload: dict, *, timeout: float = 4.0) -> tuple[in
         return 0, None
 
 
-def _hp_get_active_browser_session(project_id: int) -> dict | None:
+def _extract_frame_b64(res: dict) -> str:
+    """HuntProxy returns {"data": {"image_base64": ...}} — not a bare string."""
+    if not isinstance(res, dict):
+        return ""
+    data = res.get("data")
+    if isinstance(data, dict):
+        for key in ("image_base64", "jpeg_b64", "screenshot_b64", "b64"):
+            val = data.get(key)
+            if isinstance(val, str) and val:
+                return val
+    for key in ("jpeg_b64", "screenshot_b64", "image_base64"):
+        val = res.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return ""
+
+
+# Fields HuntProxy's BrowserAction accepts besides the `type` tag.
+_ACTION_PASSTHROUGH = (
+    "url", "op", "page_id", "runtime_generation", "locator", "full_page", "max_bytes",
+    "delta_x", "delta_y", "files", "via_chooser", "timeout_ms", "value", "method",
+    "headers", "body_text", "body_base64", "max_response_bytes", "after_sequence",
+    "limit", "kinds", "wait_ms", "format",
+)
+
+
+def _session_profile(sid: str) -> str:
+    """HuntProxy browser profile name owned by one Hermes session.
+
+    Profiles are per-session so the agent always starts from a clean jar for the target
+    instead of inheriting whatever was saved in the project's shared profile.
+    """
+    import re as _re
+
+    slug = _re.sub(r"[^A-Za-z0-9]", "", str(sid or ""))[:16]
+    return f"s{slug}" if slug else "sanon"
+
+
+def _hp_get_active_browser_session(project_id: int, profile: str | None = None) -> dict | None:
     from api.cockpit.huntproxy import _hp_get_json
 
     status, data = _hp_get_json(f"/projects/{project_id}/browser-sessions", timeout=2.5)
@@ -489,10 +542,65 @@ def _hp_get_active_browser_session(project_id: int) -> dict | None:
     sessions = data if isinstance(data, list) else (data.get("sessions") or data.get("browser_sessions") or data.get("items") or [])
     if not isinstance(sessions, list) or not sessions:
         return None
+    if profile:
+        for item in sessions:
+            if isinstance(item, dict) and str(item.get("profile") or "") == profile:
+                return item
+        return None
     for item in sessions:
         if isinstance(item, dict) and item.get("active", True):
             return item
     return sessions[0] if isinstance(sessions[0], dict) else None
+
+
+_BROWSER_ENSURE_ATTEMPT: dict[tuple[int, str], float] = {}
+
+
+def _hp_ensure_browser_session(project_id: int, profile: str = "default") -> dict | None:
+    """Active browser session for `profile`, creating a fresh one when missing.
+
+    Each Hermes session gets its own empty profile, so an agent starting work on a target
+    never inherits cookies or logins saved in the project's shared profile. Creation is
+    throttled so a one-second poll loop cannot spawn Chromium repeatedly.
+    """
+    active = _hp_get_active_browser_session(project_id, profile if profile else None)
+    if active:
+        return active
+    now = time.time()
+    key = (project_id, profile)
+    if now - _BROWSER_ENSURE_ATTEMPT.get(key, 0.0) < 20.0:
+        return None
+    _BROWSER_ENSURE_ATTEMPT[key] = now
+    payload: dict = {"profile": profile}
+    try:
+        from api.cockpit.huntproxy import _hp_get_json
+
+        st_p, proj = _hp_get_json(f"/projects/{project_id}", timeout=2.5)
+        if st_p == 200 and isinstance(proj, dict):
+            target = str(proj.get("target_url") or "").strip()
+            if target.startswith(("http://", "https://")):
+                payload["url"] = target
+    except Exception:
+        pass
+    status, data = _hp_post_json(
+        f"/projects/{project_id}/browser-sessions",
+        payload,
+        timeout=25.0,
+    )
+    if status in (200, 201) and isinstance(data, dict):
+        return data
+    # A wedged profile (e.g. "checkpoint missing private state") fails creation forever.
+    # Fall back to a dedicated cockpit profile so the pane still comes up.
+    if profile != "cockpit":
+        payload["profile"] = "cockpit"
+        status, data = _hp_post_json(
+            f"/projects/{project_id}/browser-sessions",
+            payload,
+            timeout=25.0,
+        )
+        if status in (200, 201) and isinstance(data, dict):
+            return data
+    return None
 
 
 def _hp_browser_action(project_id: int, bsid: str, payload: dict) -> dict | None:
@@ -507,15 +615,13 @@ def _hp_browser_action(project_id: int, bsid: str, payload: dict) -> dict | None
 
 
 def _hp_browser_cdp(project_id: int, bsid: str, op: str) -> dict | None:
-    payload = {"op": op}
-    if bsid:
-        st, data = _hp_post_json(f"/projects/{project_id}/browser-sessions/{bsid}/cdp", payload)
-        if st == 200 and isinstance(data, dict):
-            return data
-        if st != 404:
-            return None
-    st2, data2 = _hp_post_json(f"/projects/{project_id}/browser-cdp", {"op": op, "browser_session_id": bsid})
-    return data2 if st2 == 200 and isinstance(data2, dict) else None
+    # Real route is project-scoped: POST /projects/{id}/browser-cdp {op, session_id}.
+    # There is no /browser-sessions/{bid}/cdp sub-route.
+    payload: dict = {"op": op}
+    if str(bsid).strip().isdigit():
+        payload["session_id"] = int(str(bsid).strip())
+    st, data = _hp_post_json(f"/projects/{project_id}/browser-cdp", payload)
+    return data if st == 200 and isinstance(data, dict) else None
 
 
 def handle_browser_action(handler) -> bool:
@@ -560,32 +666,88 @@ def handle_browser_action(handler) -> bool:
         )
         return True
 
-    bs = _hp_get_active_browser_session(pid)
+    prof = _session_profile(sid)
+
+    # Agent actions cannot run while a human holds the CDP handoff ("409 conflict:
+    # browser control is handed off through CDP"). Reclaim it first, otherwise the agent
+    # is blocked forever after the first takeover.
+    if action != "cdp":
+        from api.cockpit import cdp as _cdpmod
+
+        live = _cdpmod._sessions.get(pid)
+        if live is not None:
+            holder = live.hp_session_id
+            _cdpmod.drop_session(pid)
+            if holder:
+                _hp_browser_cdp(pid, str(holder), "disable")
+
+    bs = _hp_ensure_browser_session(pid, prof)
     bsid = str((bs or {}).get("id") or (bs or {}).get("browser_session_id") or "")
 
     if action == "cdp":
+        from api.cockpit import cdp as cdpmod
+
         op = str(body.get("op") or "status").strip().lower()
         if op not in ("enable", "disable", "status"):
             bad(handler, "cdp op must be enable, disable, or status", 400)
             return True
-        res = _hp_browser_cdp(pid, bsid, op)
-        if res is None:
-            j(handler, {"ok": False, "offline": True, "message": "HuntProxy browser_cdp unavailable"})
+
+        if op == "enable":
+            # HuntProxy suspends idle browsers, and then rejects a bare browser-cdp enable
+            # with "browser session is not active" — which is why Take Control did nothing.
+            # get_session() starts (or resumes) a session, enables CDP and starts the
+            # screencast the pane consumes, in that order.
+            sess = cdpmod.get_session(pid, prof)
+            if sess is None:
+                j(
+                    handler,
+                    {"ok": False, "offline": True, "message": "could not start a live CDP session"},
+                )
+                return True
+            info = _hp_browser_cdp(pid, str(sess.hp_session_id), "status") or {}
+            j(
+                handler,
+                {
+                    "ok": True,
+                    "paused": True,
+                    "hosted_devtools_url": str(info.get("hosted_devtools_url") or ""),
+                    "ssh_forward_command": str(info.get("ssh_forward_command") or ""),
+                    "browser_session_id": sess.hp_session_id,
+                },
+            )
             return True
-        paused = op == "enable" if op in ("enable", "disable") else bool(res.get("enabled") or res.get("paused"))
+
+        if op == "disable":
+            live = cdpmod._sessions.get(pid)
+            target_sid = str((live.hp_session_id if live else 0) or bsid or "")
+            cdpmod.drop_session(pid)
+            info = _hp_browser_cdp(pid, target_sid, "disable") or {}
+            j(
+                handler,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "hosted_devtools_url": "",
+                    "ssh_forward_command": "",
+                    "raw": info,
+                },
+            )
+            return True
+
+        live = cdpmod._sessions.get(pid)
         j(
             handler,
             {
                 "ok": True,
-                "paused": paused,
-                "hosted_devtools_url": str(res.get("hosted_devtools_url") or ""),
-                "ssh_forward_command": str(res.get("ssh_forward_command") or ""),
-                "raw": res,
+                "paused": bool(live and live.alive()),
+                "hosted_devtools_url": "",
+                "ssh_forward_command": "",
             },
         )
         return True
 
-    upstream_payload = {k: v for k, v in body.items() if k not in ("session_id", "project_id")}
+    upstream_payload = {"type": action}
+    upstream_payload.update({k: body[k] for k in _ACTION_PASSTHROUGH if body.get(k) is not None})
     res = _hp_browser_action(pid, bsid, upstream_payload)
     if res is None:
         j(handler, {"ok": False, "offline": True, "message": "HuntProxy browser_action unavailable"})

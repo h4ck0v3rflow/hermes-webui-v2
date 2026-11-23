@@ -175,6 +175,10 @@ def handle_cockpit_get(handler, parsed) -> bool:
         from api.cockpit.browser import handle_browser_state
 
         return handle_browser_state(handler, parsed)
+    if parsed.path == "/api/cockpit/browser/live":
+        from api.cockpit.browser_live import handle_live_stream
+
+        return handle_live_stream(handler, parsed)
     if parsed.path == "/api/cockpit/browser/stream":
         from api.cockpit.browser import handle_browser_stream
 
@@ -232,6 +236,10 @@ def handle_cockpit_post(handler, parsed) -> bool:
         from api.cockpit.browser import handle_browser_action
 
         return handle_browser_action(handler)
+    if parsed.path == "/api/cockpit/browser/input":
+        from api.cockpit.browser_live import handle_input
+
+        return handle_input(handler)
     if parsed.path == "/api/cockpit/proxy/start":
         from api.cockpit.proxy import handle_proxy_start
 
