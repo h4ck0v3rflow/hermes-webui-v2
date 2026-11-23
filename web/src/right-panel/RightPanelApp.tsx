@@ -41,6 +41,21 @@ const TerminalPane = lazy(() =>
   }))
 );
 
+/** One pane that stays MOUNTED when hidden — switching tabs must not destroy state
+ * or reconnect streams (previously `key={activeTab}` unmounted the pane, so every
+ * tab switch reloaded it: scrollback, captures and inspector selection all lost). */
+function Pane({ active, children }: { active: boolean; children: ReactNode }) {
+  return (
+    <div
+      className="flex-1 flex-col min-w-0 min-h-0"
+      style={{ display: active ? "flex" : "none" }}
+      aria-hidden={active ? undefined : true}
+    >
+      {children}
+    </div>
+  );
+}
+
 export function RightPanelApp() {
   const sessionId = usePanelBridgeStore((s) => s.sessionId);
   const activeTab = usePanelBridgeStore((s) => s.activeTab);
@@ -65,21 +80,24 @@ export function RightPanelApp() {
             </div>
           }
         >
-          <div
-            key={activeTab}
-            className="flex flex-1 flex-col min-w-0 min-h-0 animate-[ohFadeIn_120ms_ease-out]"
-          >
-            {activeTab === "cmd" && sessionId && (
-              <TerminalPane sessionId={sessionId} />
-            )}
-            {activeTab === "browser" && sessionId && (
-              <BrowserTab sessionId={sessionId} />
-            )}
-            {activeTab === "findings" && <FindingsTab />}
-            {activeTab === "proxy" && sessionId && (
-              <HttpProxyTab sessionId={sessionId} />
-            )}
-          </div>
+          <Pane active={activeTab === "cmd"}>
+            {sessionId ? (
+              <TerminalPane sessionId={sessionId} active={activeTab === "cmd"} />
+            ) : null}
+          </Pane>
+          <Pane active={activeTab === "browser"}>
+            {sessionId ? (
+              <BrowserTab sessionId={sessionId} active={activeTab === "browser"} />
+            ) : null}
+          </Pane>
+          <Pane active={activeTab === "findings"}>
+            <FindingsTab />
+          </Pane>
+          <Pane active={activeTab === "proxy"}>
+            {sessionId ? (
+              <HttpProxyTab sessionId={sessionId} active={activeTab === "proxy"} />
+            ) : null}
+          </Pane>
         </Suspense>
       </TabErrorBoundary>
     </div>
