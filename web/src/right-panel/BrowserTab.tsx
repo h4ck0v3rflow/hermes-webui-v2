@@ -13,7 +13,7 @@ import {
   Plus,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { apiFetch } from "../lib/apiFetch";
 
 interface BrowserHistoryEntry {
@@ -82,7 +82,21 @@ function shortHost(url: string): string {
   }
 }
 
-export default function BrowserTab({ sessionId }: { sessionId: string }) {
+const DEVICE_PRESETS = {
+  desktop: { w: 1280, h: 720, mobile: false },
+  tablet: { w: 768, h: 1024, mobile: true },
+  mobile: { w: 390, h: 844, mobile: true },
+} as const;
+
+export default function BrowserTab({
+  sessionId,
+  active = true,
+}: {
+  sessionId: string;
+  /** False while another right-panel tab is showing: keeps the pane mounted (state
+   * preserved, no reload) but closes the frame stream so a hidden tab costs nothing. */
+  active?: boolean;
+}) {
   const [state, setState] = useState<BrowserStatePayload>({
     session_id: sessionId,
     url: "",
@@ -108,6 +122,26 @@ export default function BrowserTab({ sessionId }: { sessionId: string }) {
   const [selectedHistoryIdx, setSelectedHistoryIdx] = useState<number | null>(null);
   const [zoomFull, setZoomFull] = useState(false);
   const [switchingLease, setSwitchingLease] = useState(false);
+  // Live interactive mode: CDP screencast down, real input events up. Only while the
+  // human holds control — the agent's own view keeps using the snapshot path.
+  const [liveFrame, setLiveFrame] = useState<{ b64: string; w: number; h: number; seq: number } | null>(null);
+  const [liveStatus, setLiveStatus] = useState<"idle" | "ready" | "offline">("idle");
+  // Device emulation presets: the site renders its OWN responsive layout at that
+  // viewport instead of being CSS-scaled, which is what "fit" has to mean.
+  const [device, setDevice] = useState<"desktop" | "tablet" | "mobile">(() => {
+    const saved = window.localStorage.getItem("cockpit.device");
+    return saved === "tablet" || saved === "mobile" ? saved : "desktop";
+  });
+  const wheelRef = useRef<{ dx: number; dy: number; x: number; y: number; t: number }>({
+    dx: 0,
+    dy: 0,
+    x: 0,
+    y: 0,
+    t: 0,
+  });
+  const liveEsRef = useRef<EventSource | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const liveMode = Boolean(control.paused) && hpProjectId !== null;
 
   useEffect(() => {
     void apiFetch<BrowserStatePayload>(
@@ -121,7 +155,7 @@ export default function BrowserTab({ sessionId }: { sessionId: string }) {
       })
       .catch(() => {});
 
-    if (typeof EventSource === "undefined") return;
+    if (!active || typeof EventSource === "undefined") return;
     const es = new EventSource(
       `/api/cockpit/browser/stream?session_id=${encodeURIComponent(sessionId)}`,
       { withCredentials: true }
@@ -172,12 +206,13 @@ export default function BrowserTab({ sessionId }: { sessionId: string }) {
         }
         if (t === "frame") {
           const jpeg = String(data.jpeg_b64 || "");
+          const frameMime = String((data as { mime_type?: string }).mime_type || "image/png");
           const frameUrl = String(data.url || "");
           const ts = Number(data.ts || Date.now() / 1000);
           const dataUri = jpeg
             ? jpeg.startsWith("data:image/")
               ? jpeg
-              : `data:image/jpeg;base64,${jpeg}`
+              : `data:${frameMime};base64,${jpeg}`
             : "";
           if (frameUrl) setUrlInput(frameUrl);
           setSelectedHistoryIdx(null);
@@ -225,7 +260,7 @@ export default function BrowserTab({ sessionId }: { sessionId: string }) {
     return () => {
       es.close();
     };
-  }, [sessionId]);
+  }, [sessionId, active]);
 
   const history = useMemo(() => state.history ?? [], [state.history]);
   const activeIdx =
@@ -251,6 +286,137 @@ export default function BrowserTab({ sessionId }: { sessionId: string }) {
   const canGoBack = activeIdx !== null && activeIdx > 0;
   const canGoForward = activeIdx !== null && activeIdx < history.length - 1;
   const isHumanControl = control.paused || state.lease_holder === "HUMAN";
+
+  // ---- live CDP screencast (human takeover) ----
+  useEffect(() => {
+    if (!active || !liveMode || hpProjectId === null || typeof EventSource === "undefined") {
+      if (liveEsRef.current) {
+        liveEsRef.current.close();
+        liveEsRef.current = null;
+      }
+      setLiveStatus("idle");
+      return;
+    }
+    const es = new EventSource(`/api/cockpit/browser/live?project_id=${hpProjectId}`, {
+      withCredentials: true,
+    });
+    liveEsRef.current = es;
+    const onEvent = (ev: MessageEvent) => {
+      try {
+        const d = JSON.parse(ev.data) as Record<string, unknown>;
+        if (d.t === "ready") {
+          setLiveStatus("ready");
+        } else if (d.t === "offline") {
+          setLiveStatus("offline");
+        } else if (d.t === "frame" && typeof d.jpeg_b64 === "string") {
+          setLiveStatus("ready");
+          setLiveFrame({
+            b64: d.jpeg_b64,
+            w: Number(d.w) || 1280,
+            h: Number(d.h) || 720,
+            seq: Number(d.seq) || 0,
+          });
+        }
+      } catch {
+        // keepalive or malformed frame — ignore
+      }
+    };
+    es.addEventListener("browser_live", onEvent as EventListener);
+    es.onerror = () => setLiveStatus("offline");
+    return () => {
+      es.removeEventListener("browser_live", onEvent as EventListener);
+      es.close();
+      liveEsRef.current = null;
+    };
+  }, [active, liveMode, hpProjectId]);
+
+  const sendInput = (payload: Record<string, unknown>) => {
+    if (hpProjectId === null || !liveMode) return;
+    void apiFetch("/api/cockpit/browser/input", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, project_id: hpProjectId, session_id: sessionId }),
+    }).catch(() => undefined);
+  };
+
+  const framePoint = (e: { clientX: number; clientY: number }) => {
+    const el = viewportRef.current;
+    if (!el || !liveFrame) return null;
+    const rect = el.getBoundingClientRect();
+    const vw = liveFrame.w || 1280;
+    const vh = liveFrame.h || 720;
+    const scale = Math.min(rect.width / vw, rect.height / vh);
+    if (!scale) return null;
+    const offX = rect.left + (rect.width - vw * scale) / 2;
+    const offY = rect.top + (rect.height - vh * scale) / 2;
+    const x = (e.clientX - offX) / scale;
+    const y = (e.clientY - offY) / scale;
+    if (x < 0 || y < 0 || x > vw || y > vh) return null;
+    return { x: Math.round(x), y: Math.round(y) };
+  };
+
+  const handleViewportKey = (ev: {
+    key: string;
+    preventDefault: () => void;
+    altKey: boolean;
+    ctrlKey: boolean;
+    metaKey: boolean;
+    shiftKey: boolean;
+  }) => {
+    if (!liveMode) return;
+    const modifiers =
+      (ev.altKey ? 1 : 0) | (ev.ctrlKey ? 2 : 0) | (ev.metaKey ? 4 : 0) | (ev.shiftKey ? 8 : 0);
+    const special = [
+      "Enter",
+      "Tab",
+      "Escape",
+      "Backspace",
+      "Delete",
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "Home",
+      "End",
+      "PageUp",
+      "PageDown",
+    ];
+    if (special.indexOf(ev.key) !== -1) {
+      ev.preventDefault();
+      sendInput({ kind: "key", key: ev.key, modifiers });
+      return;
+    }
+    if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey) {
+      ev.preventDefault();
+      sendInput({ kind: "text", text: ev.key });
+    }
+  };
+
+  // Apply the chosen viewport as soon as the live session is up, and on every change.
+  useEffect(() => {
+    if (!liveMode) return;
+    const p = DEVICE_PRESETS[device];
+    sendInput({ kind: "device", width: p.w, height: p.h, mobile: p.mobile });
+    window.localStorage.setItem("cockpit.device", device);
+  }, [device, liveMode]);
+
+  // Wheel events fire ~60/s; forwarding each one buried the click behind hundreds of
+  // POSTs, which is why a click took a minute to land. Coalesce to one flush per 60 ms.
+  const flushWheel = (x: number, y: number, dx: number, dy: number) => {
+    const b = wheelRef.current;
+    b.dx += dx;
+    b.dy += dy;
+    b.x = x;
+    b.y = y;
+    if (b.t) return;
+    b.t = window.setTimeout(() => {
+      const c = wheelRef.current;
+      sendInput({ kind: "wheel", x: c.x, y: c.y, deltaX: c.dx, deltaY: c.dy });
+      c.dx = 0;
+      c.dy = 0;
+      c.t = 0;
+    }, 60);
+  };
 
   const toggleLease = async () => {
     setSwitchingLease(true);
@@ -552,6 +718,18 @@ export default function BrowserTab({ sessionId }: { sessionId: string }) {
           {displayTs > 0 && <span className="shrink-0">· {formatAge(displayTs)}</span>}
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {liveMode && (
+            <select
+              value={device}
+              onChange={(e) => setDevice(e.target.value as "desktop" | "tablet" | "mobile")}
+              title="Emulated viewport — the site renders its own responsive layout"
+              className="cursor-pointer rounded border border-[var(--oh-border)] bg-[var(--oh-surface)] px-1 py-0.5 text-[10px] text-[var(--oh-text)]"
+            >
+              <option value="desktop">Desktop</option>
+              <option value="tablet">Tablet</option>
+              <option value="mobile">Mobile</option>
+            </select>
+          )}
           {timeline.length > 0 && (
             <button
               type="button"
@@ -594,9 +772,47 @@ export default function BrowserTab({ sessionId }: { sessionId: string }) {
         </div>
       </div>
 
-      {/* Viewport */}
-      <div className="flex flex-1 flex-col min-h-0 overflow-auto bg-[#090b0e]">
-        {hasPage ? (
+      {/* Viewport — live mode fills the pane exactly (object-contain, never a CSS zoom) */}
+      <div className="flex flex-1 flex-col min-h-0 overflow-hidden bg-[#090b0e]">
+        {liveMode ? (
+          <div
+            ref={viewportRef}
+            tabIndex={0}
+            title="Click to interact — keyboard goes to the page"
+            onPointerDown={(e) => {
+              const p = framePoint(e);
+              if (!p) return;
+              e.currentTarget.focus();
+              sendInput({ kind: "click", x: p.x, y: p.y, button: e.button === 2 ? "right" : "left" });
+            }}
+            onWheel={(e) => {
+              const p = framePoint(e);
+              if (!p) return;
+              flushWheel(p.x, p.y, e.deltaX, e.deltaY);
+            }}
+            onContextMenu={(e) => e.preventDefault()}
+            onKeyDown={handleViewportKey}
+            className="relative flex-1 min-h-0 w-full cursor-crosshair outline-none"
+          >
+            {liveFrame ? (
+              <img
+                src={`data:image/jpeg;base64,${liveFrame.b64}`}
+                alt="Live browser viewport"
+                draggable={false}
+                className="pointer-events-none absolute inset-0 h-full w-full select-none object-contain"
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center text-[11px] text-[var(--oh-muted)]">
+                {liveStatus === "offline"
+                  ? "Live view unavailable — CDP offline"
+                  : "Attaching live view…"}
+              </div>
+            )}
+            <div className="pointer-events-none absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
+              LIVE{liveFrame ? ` ${liveFrame.w}×${liveFrame.h}` : ""}
+            </div>
+          </div>
+        ) : hasPage ? (
           <div className={zoomFull ? "p-2 min-w-max" : "p-2.5 flex flex-1 items-start justify-center"}>
             <img
               src={imgSrc}

@@ -22123,6 +22123,26 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return j(handler, {"error": str(e)})
 
+    if parsed.path == "/api/session/undo_to":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        try:
+            from api.session_ops import undo_to
+            result = undo_to(
+                body["session_id"],
+                user_ordinal_from_end=body.get("user_ordinal_from_end"),
+                user_index=body.get("user_index"),
+            )
+            return j(handler, {"ok": True, **result})
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except ValueError as e:
+            return j(handler, {"error": str(e)})
+
     if parsed.path == "/api/session/undo":
         try:
             require(body, "session_id")

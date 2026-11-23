@@ -376,7 +376,9 @@ function buildPerfAndBridgeScript() {
         row.className = 'cockpit-live-edit-row';
         row.title = item.path;
         row.onclick = function() {
-          if (typeof window.openFile === 'function') {
+          if (typeof openExternalFile === 'function') {
+            void openExternalFile(item.path);
+          } else if (typeof window.openFile === 'function') {
             window.openFile(item.path, { bustCache: true });
           } else if (typeof window.openArtifactPath === 'function') {
             window.openArtifactPath(item.path);
@@ -584,12 +586,76 @@ function buildPerfAndBridgeScript() {
     }
   }
 
+  // Prism is loaded from a CDN and its autoloader silently no-ops when the network or CSP
+  // blocks it — which left "Styled" rendering identical to "Raw". Fall back to a tiny
+  // built-in tokenizer so styled code is always styled. (No backticks in this block: it is
+  // injected inside a template literal.)
+  var CK_KEYWORDS = 'def|class|import|from|return|if|else|elif|for|while|try|except|finally|with|as|lambda|yield|global|nonlocal|pass|raise|assert|del|None|True|False|and|or|not|in|is|async|await|const|let|var|function|new|export|default|extends|implements|public|private|protected|static|void|int|float|string|bool|char|struct|enum|fn|impl|use|mod|pub|match|package|func|type|interface|range|switch|case|break|continue|this|self|super|null|undefined|true|false|end|then|do|begin|module|require|include';
+
+  function cockpitFallbackHighlight(el, text) {
+    if (!text || text.length > 200000) return;
+    var kw = {};
+    CK_KEYWORDS.split('|').forEach(function (k) { kw[k] = 1; });
+    var esc = function (s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    };
+    var out = '';
+    var i = 0;
+    var n = text.length;
+    while (i < n) {
+      var ch = text.charAt(i);
+      // quoted string (straight quotes only; handles backslash escapes)
+      if (ch === '"' || ch === "'") {
+        var j = i + 1;
+        while (j < n && text.charAt(j) !== ch && text.charCodeAt(j) !== 10) {
+          if (text.charCodeAt(j) === 92) j += 1;
+          j += 1;
+        }
+        j = Math.min(j + 1, n);
+        out += '<span class="ck-str">' + esc(text.slice(i, j)) + '</span>';
+        i = j;
+        continue;
+      }
+      // line comment
+      if (ch === '#' || (ch === '/' && text.charAt(i + 1) === '/')) {
+        var e = text.indexOf(String.fromCharCode(10), i);
+        if (e < 0) e = n;
+        out += '<span class="ck-cmt">' + esc(text.slice(i, e)) + '</span>';
+        i = e;
+        continue;
+      }
+      // identifier / keyword
+      if (/[A-Za-z_$]/.test(ch)) {
+        var k = i;
+        while (k < n && /[A-Za-z0-9_$]/.test(text.charAt(k))) k += 1;
+        var w = text.slice(i, k);
+        out += kw[w] ? '<span class="ck-kw">' + esc(w) + '</span>' : esc(w);
+        i = k;
+        continue;
+      }
+      // number
+      if (/[0-9]/.test(ch)) {
+        var q = i;
+        while (q < n && /[0-9.]/.test(text.charAt(q))) q += 1;
+        out += '<span class="ck-num">' + esc(text.slice(i, q)) + '</span>';
+        i = q;
+        continue;
+      }
+      out += esc(ch);
+      i += 1;
+    }
+    el.innerHTML = out;
+    el.dataset.ckHighlighted = '1';
+  }
+
   function renderStyledContent(filePath, content) {
     var ext = (typeof window.fileExt === 'function') ? window.fileExt(filePath) : '';
     if (!ext) {
       var dot = String(filePath || '').lastIndexOf('.');
       ext = dot >= 0 ? String(filePath).slice(dot).toLowerCase() : '';
     }
+    var pc0 = document.getElementById('previewCode');
+    if (pc0) delete pc0.dataset.ckHighlighted;
     var isMd = (typeof MD_EXTS !== 'undefined' && MD_EXTS.has(ext)) || ext === '.md' || ext === '.markdown' || ext === '.mdx';
     if (isMd && typeof window.renderMarkdownPreviewContent === 'function') {
       window.renderMarkdownPreviewContent({ content: content });
@@ -598,17 +664,34 @@ function buildPerfAndBridgeScript() {
     if (ext === '.csv' && typeof window.renderCsvPreviewContent === 'function') {
       if (window.renderCsvPreviewContent(filePath, content)) return;
     }
-    if (typeof window.renderCodePreviewContent === 'function') {
-      window.renderCodePreviewContent(filePath, content);
+    // Render code directly instead of delegating to the legacy renderer: that one awaits the
+    // Prism CDN autoloader, so the pane sat as raw text for seconds before styling (or stayed
+    // unstyled forever when the CDN is blocked). This path is synchronous — styled on paint.
+    if (typeof window.showPreview === 'function') window.showPreview('code');
+    var pc = document.getElementById('previewCode');
+    if (pc) {
+      pc.textContent = content || '';
+      pc.scrollTop = 0;
+      if (content && content.length <= 400000) cockpitFallbackHighlight(pc, content);
       return;
     }
     if (typeof window.showPreview === 'function') window.showPreview('code');
-    var pc = document.getElementById('previewCode');
-    if (pc) pc.textContent = content;
+    var pc2 = document.getElementById('previewCode');
+    if (pc2) {
+      pc2.textContent = content;
+      cockpitFallbackHighlight(pc2, content || '');
+    }
   }
+
 
   window.cockpitSetPreviewMode = function(mode) {
     if (previewModeState.content === null) return;
+    // Don't throw away in-progress typing when the operator flips tabs.
+    if (window.cockpitEditor && typeof window.cockpitEditor.isEditable === 'function'
+        && window.cockpitEditor.isEditable()
+        && typeof window.cockpitEditor.getContent === 'function') {
+      previewModeState.content = window.cockpitEditor.getContent();
+    }
     previewModeState.mode = mode === 'raw' ? 'raw' : 'styled';
     syncPreviewModeTabsUi();
     if (previewModeState.mode === 'raw') {
@@ -625,6 +708,11 @@ function buildPerfAndBridgeScript() {
     }
   };
 
+  // Source/config/log files must be PREVIEWED, never handed to the browser as a download.
+  // Chrome downloads text/x-python, application/json, etc.; the old code let DOWNLOAD_EXTS
+  // win for those, so clicking a session edit saved a file instead of showing it.
+  var TEXT_PREVIEW_EXTS = new Set(['.py','.pyi','.pyx','.js','.mjs','.cjs','.mts','.cts','.ts','.tsx','.jsx','.json','.jsonl','.ndjson','.json5','.jsonc','.webmanifest','.md','.markdown','.mdx','.txt','.rst','.adoc','.org','.log','.out','.err','.trace','.yml','.yaml','.toml','.ini','.cfg','.conf','.config','.properties','.plist','.env','.sh','.bash','.zsh','.fish','.ps1','.bat','.cmd','.sql','.rb','.php','.go','.rs','.java','.kt','.kts','.scala','.groovy','.gradle','.clj','.cljs','.c','.h','.cc','.cpp','.hpp','.cs','.swift','.lua','.pl','.pm','.r','.jl','.dart','.ex','.exs','.erl','.fs','.fsx','.vb','.m','.mm','.zig','.nim','.v','.sv','.asm','.s','.sol','.tf','.tfvars','.hcl','.nix','.bzl','.bazel','.cmake','.mk','.proto','.graphql','.gql','.vue','.svelte','.astro','.html','.htm','.xml','.svg','.css','.scss','.sass','.less','.ejs','.hbs','.mustache','.twig','.j2','.jinja','.jinja2','.erb','.haml','.slim','.tex','.bib','.csv','.tsv','.patch','.diff','.gitignore','.gitattributes','.dockerfile','.editorconfig','.lock','.har','.http','.rest','.service','.rules','.ovpn','.pem','.crt','.key','.pub','.csproj','.sln']);
+
   async function openExternalFile(absPath) {
     var st = getLegacyState();
     var sid = st && st.session ? st.session.session_id : '';
@@ -636,7 +724,7 @@ function buildPerfAndBridgeScript() {
     }
     var rawUrl = '/api/cockpit/fs/raw?session_id=' + encodeURIComponent(sid) + '&path=' + encodeURIComponent(absPath);
 
-    if (typeof DOWNLOAD_EXTS !== 'undefined' && DOWNLOAD_EXTS.has(ext)) {
+    if (!TEXT_PREVIEW_EXTS.has(ext) && typeof DOWNLOAD_EXTS !== 'undefined' && DOWNLOAD_EXTS.has(ext)) {
       var dl = document.createElement('a');
       dl.href = rawUrl + '&download=1';
       dl.download = absPath.split(/[\\/]/).pop() || 'download';
@@ -711,6 +799,28 @@ function buildPerfAndBridgeScript() {
       var resp = await fetch('/api/cockpit/fs/read?session_id=' + encodeURIComponent(sid) + '&path=' + encodeURIComponent(absPath), { credentials: 'include' });
       if (!resp.ok) return;
       var data = await resp.json();
+      if (data && data.binary) {
+        // Never render mojibake for a binary file — say what it is and offer the raw view.
+        var pab = document.getElementById('previewArea');
+        var ptb = document.getElementById('previewPathText');
+        var pbb = document.getElementById('previewBadge');
+        var ftb = document.getElementById('fileTree');
+        var sizeKb = Math.max(1, Math.round((data.size || 0) / 1024));
+        if (ptb) ptb.textContent = absPath;
+        if (pbb) pbb.textContent = 'binary';
+        if (ftb) ftb.style.display = 'none';
+        if (pab) pab.classList.add('visible');
+        if (typeof window.showPreview === 'function') window.showPreview('code');
+        var pcb = document.getElementById('previewCode');
+        if (pcb) {
+          pcb.textContent = 'Binary file (' + sizeKb + ' KB) — not shown as text. Use the Raw tab to open or download it.';
+        }
+        previewModeState.path = absPath;
+        previewModeState.content = '';
+        previewModeState.mode = 'styled';
+        syncPreviewModeTabsUi();
+        return;
+      }
       var resolvedPath = data.path || absPath;
       var content = data.content || '';
       wsNav.externalFile = resolvedPath;
@@ -1219,7 +1329,7 @@ function buildIndexHtml({ coreFileName, cssFileName, legacyHashes, bridgeFileNam
   const panelCssTag = panelCss
     ? `\n<link rel="stylesheet" href="static/v2/assets/${panelCss}">`
     : "";
-  const extraTabsStyle = `\n<style id="cockpit-extra-tabs-style">.app-titlebar{justify-content:space-between!important;padding:0 12px;gap:8px;}.app-titlebar-inner{justify-content:flex-start!important;flex:1 1 auto;min-width:0;}.app-titlebar-spacer{display:none!important;}.app-titlebar-rightpanel-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;flex-shrink:0;transition:background .15s,color .15s,border-color .15s;-webkit-app-region:no-drag;}.app-titlebar-rightpanel-btn:hover{background:var(--hover-bg);color:var(--text);}.app-titlebar-rightpanel-btn[aria-pressed="true"],html[data-workspace-panel="open"] .app-titlebar-rightpanel-btn{color:var(--accent-text,var(--text));background:var(--accent-bg,var(--surface-subtle));border-color:var(--border2,var(--border));}.workspace-panel-tabs{flex-wrap:wrap;}.workspace-panel-tab{white-space:nowrap;flex:1 0 auto;padding:4px 7px;font-size:11.5px;}.rightpanel:not([data-active-tab="files"]) .panel-header,.rightpanel:not([data-active-tab="files"]) .cockpit-live-edits{display:none!important;}.rightpanel[data-active-tab="cmd"] .breadcrumb-bar,.rightpanel[data-active-tab="cmd"] .file-tree,.rightpanel[data-active-tab="cmd"] #wsEmptyState,.rightpanel[data-active-tab="cmd"] .workspace-artifacts,.rightpanel[data-active-tab="cmd"] .workspace-todos,.rightpanel[data-active-tab="cmd"] .preview-area,.rightpanel[data-active-tab="browser"] .breadcrumb-bar,.rightpanel[data-active-tab="browser"] .file-tree,.rightpanel[data-active-tab="browser"] #wsEmptyState,.rightpanel[data-active-tab="browser"] .workspace-artifacts,.rightpanel[data-active-tab="browser"] .workspace-todos,.rightpanel[data-active-tab="browser"] .preview-area,.rightpanel[data-active-tab="findings"] .breadcrumb-bar,.rightpanel[data-active-tab="findings"] .file-tree,.rightpanel[data-active-tab="findings"] #wsEmptyState,.rightpanel[data-active-tab="findings"] .workspace-artifacts,.rightpanel[data-active-tab="findings"] .workspace-todos,.rightpanel[data-active-tab="findings"] .preview-area,.rightpanel[data-active-tab="proxy"] .breadcrumb-bar,.rightpanel[data-active-tab="proxy"] .file-tree,.rightpanel[data-active-tab="proxy"] #wsEmptyState,.rightpanel[data-active-tab="proxy"] .workspace-artifacts,.rightpanel[data-active-tab="proxy"] .workspace-todos,.rightpanel[data-active-tab="proxy"] .preview-area{display:none!important;}.rightpanel[data-active-tab="cmd"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="browser"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="findings"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="proxy"] #cockpit-extra-tabs-root{display:flex!important;}.rightpanel:not([data-active-tab="cmd"]):not([data-active-tab="browser"]):not([data-active-tab="findings"]):not([data-active-tab="proxy"]) #cockpit-extra-tabs-root{display:none!important;}.cockpit-live-edits{border-bottom:1px solid var(--border);background:var(--surface-subtle);flex-shrink:0;}.cockpit-live-edits-hdr{width:100%;display:flex;align-items:center;gap:6px;padding:6px 12px;border:0;background:transparent;color:var(--text);font-size:11px;font-weight:600;cursor:pointer;text-align:left;}.cockpit-live-edits-hdr:hover{background:var(--hover-bg);}.cockpit-live-dot{width:7px;height:7px;border-radius:50%;background:#10b981;flex-shrink:0;box-shadow:0 0 0 2px rgba(16,185,129,.22);}.cockpit-live-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.cockpit-live-count{font-size:10px;padding:1px 6px;border-radius:999px;background:var(--hover-bg);color:var(--muted);font-family:var(--font-mono);}.cockpit-live-chev{color:var(--muted);font-size:10px;}.cockpit-live-edits-list{max-height:132px;overflow-y:auto;border-top:1px solid var(--border);padding:4px;}.cockpit-live-edit-row{width:100%;display:flex;align-items:center;gap:6px;padding:4px 8px;border:0;border-radius:5px;background:transparent;color:var(--text);font-size:11px;cursor:pointer;text-align:left;}.cockpit-live-edit-row:hover{background:var(--hover-bg);}.cockpit-live-edit-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);}.cockpit-file-badge{margin-left:auto;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;font-family:var(--font-mono);letter-spacing:.03em;flex-shrink:0;}.cockpit-file-badge--new{background:rgba(16,185,129,.16);color:#10b981;}.cockpit-file-badge--mod{background:rgba(245,158,11,.16);color:#f59e0b;}.cockpit-file-badge--del{background:rgba(239,68,68,.16);color:#ef4444;}.cockpit-preview-mode-tabs{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--border);border-radius:6px;background:var(--surface-subtle);flex-shrink:0;}.cockpit-preview-mode-tabs[hidden]{display:none!important;}.cockpit-preview-mode-tab{border:0;background:transparent;color:var(--muted);font-size:11px;font-weight:500;padding:2px 8px;border-radius:4px;cursor:pointer;line-height:1.3;}.cockpit-preview-mode-tab:hover{color:var(--text);}.cockpit-preview-mode-tab.active{background:var(--surface);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.2);}#messages{overflow-anchor:auto;}#messages>.msg,#messages>.message,.chat-messages>.msg,.chat-messages>.message{content-visibility:auto;contain-intrinsic-size:auto 120px;}</style>`;
+  const extraTabsStyle = `\n<style id="cockpit-extra-tabs-style">.app-titlebar{justify-content:space-between!important;padding:0 12px;gap:8px;}.app-titlebar-inner{justify-content:flex-start!important;flex:1 1 auto;min-width:0;}.app-titlebar-spacer{display:none!important;}.app-titlebar-rightpanel-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;flex-shrink:0;transition:background .15s,color .15s,border-color .15s;-webkit-app-region:no-drag;}.app-titlebar-rightpanel-btn:hover{background:var(--hover-bg);color:var(--text);}.app-titlebar-rightpanel-btn[aria-pressed="true"],html[data-workspace-panel="open"] .app-titlebar-rightpanel-btn{color:var(--accent-text,var(--text));background:var(--accent-bg,var(--surface-subtle));border-color:var(--border2,var(--border));}.workspace-panel-tabs{flex-wrap:wrap;}.workspace-panel-tab{white-space:nowrap;flex:1 0 auto;padding:4px 7px;font-size:11.5px;}.rightpanel:not([data-active-tab="files"]) .panel-header,.rightpanel:not([data-active-tab="files"]) .cockpit-live-edits{display:none!important;}.rightpanel[data-active-tab="cmd"] .breadcrumb-bar,.rightpanel[data-active-tab="cmd"] .file-tree,.rightpanel[data-active-tab="cmd"] #wsEmptyState,.rightpanel[data-active-tab="cmd"] .workspace-artifacts,.rightpanel[data-active-tab="cmd"] .workspace-todos,.rightpanel[data-active-tab="cmd"] .preview-area,.rightpanel[data-active-tab="browser"] .breadcrumb-bar,.rightpanel[data-active-tab="browser"] .file-tree,.rightpanel[data-active-tab="browser"] #wsEmptyState,.rightpanel[data-active-tab="browser"] .workspace-artifacts,.rightpanel[data-active-tab="browser"] .workspace-todos,.rightpanel[data-active-tab="browser"] .preview-area,.rightpanel[data-active-tab="findings"] .breadcrumb-bar,.rightpanel[data-active-tab="findings"] .file-tree,.rightpanel[data-active-tab="findings"] #wsEmptyState,.rightpanel[data-active-tab="findings"] .workspace-artifacts,.rightpanel[data-active-tab="findings"] .workspace-todos,.rightpanel[data-active-tab="findings"] .preview-area,.rightpanel[data-active-tab="proxy"] .breadcrumb-bar,.rightpanel[data-active-tab="proxy"] .file-tree,.rightpanel[data-active-tab="proxy"] #wsEmptyState,.rightpanel[data-active-tab="proxy"] .workspace-artifacts,.rightpanel[data-active-tab="proxy"] .workspace-todos,.rightpanel[data-active-tab="proxy"] .preview-area{display:none!important;}.rightpanel[data-active-tab="cmd"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="browser"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="findings"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="proxy"] #cockpit-extra-tabs-root{display:flex!important;}.rightpanel:not([data-active-tab="cmd"]):not([data-active-tab="browser"]):not([data-active-tab="findings"]):not([data-active-tab="proxy"]) #cockpit-extra-tabs-root{display:none!important;}.cockpit-live-edits{border-bottom:1px solid var(--border);background:var(--surface-subtle);flex-shrink:0;}.cockpit-live-edits-hdr{width:100%;display:flex;align-items:center;gap:6px;padding:6px 12px;border:0;background:transparent;color:var(--text);font-size:11px;font-weight:600;cursor:pointer;text-align:left;}.cockpit-live-edits-hdr:hover{background:var(--hover-bg);}.cockpit-live-dot{width:7px;height:7px;border-radius:50%;background:#10b981;flex-shrink:0;box-shadow:0 0 0 2px rgba(16,185,129,.22);}.cockpit-live-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.cockpit-live-count{font-size:10px;padding:1px 6px;border-radius:999px;background:var(--hover-bg);color:var(--muted);font-family:var(--font-mono);}.cockpit-live-chev{color:var(--muted);font-size:10px;}.cockpit-live-edits-list{max-height:132px;overflow-y:auto;border-top:1px solid var(--border);padding:4px;}.cockpit-live-edit-row{width:100%;display:flex;align-items:center;gap:6px;padding:4px 8px;border:0;border-radius:5px;background:transparent;color:var(--text);font-size:11px;cursor:pointer;text-align:left;}.cockpit-live-edit-row:hover{background:var(--hover-bg);}.cockpit-live-edit-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);}.cockpit-file-badge{margin-left:auto;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;font-family:var(--font-mono);letter-spacing:.03em;flex-shrink:0;}.cockpit-file-badge--new{background:rgba(16,185,129,.16);color:#10b981;}.cockpit-file-badge--mod{background:rgba(245,158,11,.16);color:#f59e0b;}.cockpit-file-badge--del{background:rgba(239,68,68,.16);color:#ef4444;}.cockpit-preview-mode-tabs{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--border);border-radius:6px;background:var(--surface-subtle);flex-shrink:0;}.cockpit-preview-mode-tabs[hidden]{display:none!important;}.cockpit-preview-mode-tab{border:0;background:transparent;color:var(--muted);font-size:11px;font-weight:500;padding:2px 8px;border-radius:4px;cursor:pointer;line-height:1.3;}.cockpit-preview-mode-tab:hover{color:var(--text);}.cockpit-preview-mode-tab.active{background:var(--surface);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.2);}#messages{overflow-anchor:auto;}#messages>.msg,#messages>.message,.chat-messages>.msg,.chat-messages>.message{content-visibility:auto;contain-intrinsic-size:auto 120px;}.app-titlebar-telemetry{display:inline-flex;align-items:center;gap:6px;margin-right:8px;flex-shrink:0;-webkit-app-region:no-drag;}.cktel{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border:1px solid var(--border,#333);border-radius:999px;background:var(--surface-subtle,rgba(255,255,255,.05));font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:10.5px;line-height:1.4;color:var(--muted,#8b8b8b);white-space:nowrap;}.cktel-k{font-weight:600;letter-spacing:.04em;opacity:.75;}.cktel-v{color:var(--text,inherit);font-variant-numeric:tabular-nums;}.cktel[data-level="warn"] .cktel-v{color:#f59e0b;}.cktel[data-level="hot"] .cktel-v{color:#ef4444;}@media(max-width:700px){.app-titlebar-telemetry{gap:3px;margin-right:4px;}.cktel{padding:1px 5px;font-size:9.5px;}.cktel-k{display:none;}}.ck-kw{color:#c792ea;}.ck-str{color:#c3e88d;}.ck-cmt{color:#7f8c98;font-style:italic;}.ck-num{color:#f78c6c;}#messages{overflow-anchor:none!important;}#btnEditFile{display:none!important;}.ck-undo{position:absolute;top:2px;right:6px;z-index:5;opacity:0;transition:opacity .12s;font-size:10px;padding:2px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--surface-subtle,rgba(255,255,255,.06));color:var(--muted,#9aa4ae);cursor:pointer;}.msg-row[data-role="user"]{position:relative;}.msg-row[data-role="user"]:hover .ck-undo{opacity:1;}.ck-undo:hover{color:#f87171;border-color:rgba(248,113,113,.5);}.ck-narr{margin:6px 0;padding:2px 0 2px 8px;border-left:2px solid rgba(52,211,153,.45);white-space:pre-wrap;word-break:break-word;font-size:12.5px;line-height:1.55;color:var(--text-secondary,#b9c2cc);}</style>`;
   html = html.replace(
     '<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">',
     `<link rel="stylesheet" href="static/v2/${cssFileName}?v=__WEBUI_VERSION__">${panelCssTag}${extraTabsStyle}`
@@ -1232,7 +1342,8 @@ function buildIndexHtml({ coreFileName, cssFileName, legacyHashes, bridgeFileNam
   }
   html = html.replace(
     titlebarEndRegex,
-    `$1  <button class="app-titlebar-rightpanel-btn has-tooltip has-tooltip--left" id="btnTitlebarRightPanel" type="button" onclick="toggleWorkspacePanel()" data-tooltip="Toggle right panel" aria-label="Toggle right panel" aria-pressed="false" title="Show/hide right panel">
+    `$1  <span id="cockpitTelemetry" class="app-titlebar-telemetry" role="status" aria-label="Live VPS usage" title="Live VPS usage — CPU / RAM / disk"><span class="cktel" id="cktelCpu"><span class="cktel-k">CPU</span><span class="cktel-v">–</span></span><span class="cktel" id="cktelRam"><span class="cktel-k">RAM</span><span class="cktel-v">–</span></span><span class="cktel" id="cktelDisk"><span class="cktel-k">DISK</span><span class="cktel-v">–</span></span></span>
+  <button class="app-titlebar-rightpanel-btn has-tooltip has-tooltip--left" id="btnTitlebarRightPanel" type="button" onclick="toggleWorkspacePanel()" data-tooltip="Toggle right panel" aria-label="Toggle right panel" aria-pressed="false" title="Show/hide right panel">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></svg>
   </button>
 $2`
@@ -1320,7 +1431,119 @@ $2`
     `<script src="static/v2/${coreFileName}?v=__WEBUI_VERSION__" defer></script>
 ${legacyTags}
 <script src="static/v2/${bridgeFileName}?v=__WEBUI_VERSION__" defer></script>
-<script type="module" src="static/v2/assets/${panelJs}"></script>`
+<script type="module" src="static/v2/assets/${panelJs}"></script>
+<script>/* cockpit telemetry: live CPU / RAM / disk in the titlebar, left of the panel toggle */
+(function(){function level(p){return p>=85?"hot":p>=70?"warn":"";}
+function paint(id,pct){var el=document.getElementById(id);if(!el)return;var v=el.querySelector(".cktel-v");if(v)v.textContent=pct+"%";el.setAttribute("data-level",level(pct));el.title=id.replace("cktel","")+" "+pct+"%";}
+function tick(){if(document.hidden)return;fetch("/api/system/health",{credentials:"same-origin",cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d||d.available===false)return;var c=Math.round(((d.cpu||{}).percent)||0),m=Math.round(((d.memory||{}).percent)||0),k=Math.round(((d.disk||{}).percent)||0);paint("cktelCpu",c);paint("cktelRam",m);paint("cktelDisk",k);}).catch(function(){});}
+setTimeout(tick,500);setInterval(tick,5000);document.addEventListener("visibilitychange",function(){if(!document.hidden)tick();});})();</script>
+<script>/* cockpit: keep the transcript pinned while a reply streams. The legacy renderer
+re-anchors mid-stream and yanks the viewport back up to the user's message; this
+re-pins to the bottom on every mutation unless the operator scrolled up on purpose. */
+(function(){var el=document.getElementById('messages');if(!el)return;var stick=true,raf=0;
+function near(){return (el.scrollHeight-el.scrollTop-el.clientHeight)<160;}
+function afterUser(){setTimeout(function(){stick=near();},160);}
+['wheel','touchmove','keydown'].forEach(function(ev){el.addEventListener(ev,afterUser,{passive:true});});
+function pin(){if(!stick||raf)return;raf=requestAnimationFrame(function(){raf=0;el.scrollTop=el.scrollHeight;});}
+new MutationObserver(pin).observe(el,{childList:true,subtree:true,characterData:true});
+el.scrollTop=el.scrollHeight;})();</script>
+<script>/* cockpit: mirror agent narration inside the live "Processed" worklog.
+   Mid-turn the legacy renderer hides assistant prose and shows only scene rows, so the
+   operator goes blind between tool calls. Mirror each *superseded* hidden segment's text as
+   a read-only row inside the worklog (idempotent, removed when its source disappears). The
+   newest segment is skipped so the in-progress answer is never duplicated. */
+(function(){
+  var rows = new Map();
+  function worklogList(){
+    return document.querySelector('.live-worklog[data-live-worklog-shell="1"] .tool-worklog-list')
+        || document.querySelector('.live-worklog .tool-worklog-list');
+  }
+  function settle(){
+    var list = worklogList();
+    var segs = document.querySelectorAll('.assistant-segment');
+    if (!list) return;
+    var alive = new Set();
+    for (var i=0;i<segs.length;i++){
+      if (i === segs.length-1) continue;
+      var seg = segs[i];
+      var t = (seg.textContent||'').trim();
+      if (!t) continue;
+      var hidden = seg.hidden || seg.getAttribute('aria-hidden')==='true'
+        || (seg.style && seg.style.display==='none')
+        || seg.classList.contains('assistant-segment-worklog-source');
+      if (!hidden) continue;
+      alive.add(seg);
+      var row = rows.get(seg);
+      if (!row || !row.parentNode){
+        row = document.createElement('div');
+        row.className = 'wl-reason ck-narr';
+        row.setAttribute('data-ck-narration','1');
+        list.appendChild(row);
+        rows.set(seg, row);
+      }
+      if (row.textContent !== t) row.textContent = t;
+    }
+    rows.forEach(function(row, seg){
+      if (!alive.has(seg) || !seg.isConnected){
+        if (row.parentNode) row.parentNode.removeChild(row);
+        rows.delete(seg);
+      }
+    });
+  }
+  var pending=0;
+  function schedule(){ clearTimeout(pending); pending=setTimeout(settle,180); }
+  new MutationObserver(schedule).observe(document.body,{childList:true,subtree:true,characterData:true});
+  setInterval(settle,1500);
+})();</script>
+<script>/* cockpit: per-message rewind. Any user message can delete itself and everything
+after it via /api/session/undo_to, which truncates the transcript server-side with the
+same lock/watermark path as the native /undo command. */
+(function(){
+  function sid(){
+    try{ var s=window.__HERMES_GET_S__&&window.__HERMES_GET_S__(); return s&&s.session?s.session.session_id:''; }catch(e){ return ''; }
+  }
+  function toast(m,kind){ if(typeof showToast==='function') showToast(m,3200,kind||'info'); }
+  function decorate(){
+    var rows=document.querySelectorAll('.msg-row[data-role="user"]:not([data-ck-undo])');
+    for(var i=0;i<rows.length;i++){
+      (function(row){
+        row.setAttribute('data-ck-undo','1');
+        var b=document.createElement('button');
+        b.type='button'; b.className='ck-undo'; b.textContent='Undo';
+        b.title='Delete this message and every message after it';
+        b.addEventListener('click',function(ev){
+          ev.preventDefault(); ev.stopPropagation();
+          var idx=Number(row.getAttribute('data-msg-idx'));
+          var s=sid();
+          if(!s){ toast('No active session','error'); return; }
+          if(!window.confirm('Rewind to this message? This permanently deletes this prompt and everything after it. Already-made file/system changes are NOT reverted.')) return;
+          b.disabled=true; b.textContent='Undoing...';
+          var cfg=window.__HERMES_CONFIG__||{}; var h={'Content-Type':'application/json'};
+          if(cfg.csrfToken) h['X-CSRF-Token']=cfg.csrfToken;
+          fetch('/api/session/undo_to',{method:'POST',credentials:'same-origin',headers:h,
+            body:JSON.stringify({session_id:s,user_index:idx})})
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+              if(d&&d.ok){
+                toast('Rewound - removed '+d.removed_count+' messages','success');
+                try{ if(typeof loadSession==='function'){ loadSession(s); return; } }catch(e){}
+                location.reload();
+              } else {
+                toast((d&&d.error)||'Undo failed','error');
+                b.disabled=false; b.textContent='\u21b6 Undo';
+              }
+            })
+            .catch(function(){ toast('Undo failed','error'); b.disabled=false; b.textContent='\u21b6 Undo'; });
+        });
+        row.appendChild(b);
+      })(rows[i]);
+    }
+  }
+  var t=0; function sched(){ clearTimeout(t); t=setTimeout(decorate,250); }
+  new MutationObserver(sched).observe(document.body,{childList:true,subtree:true});
+  setInterval(decorate,2000);
+  decorate();
+})();</script>`
   );
 
   fs.writeFileSync(path.join(OUT_DIR, "index.html"), html, "utf8");

@@ -1250,6 +1250,71 @@ def undo_last(session_id: str) -> dict[str, Any]:
     }
 
 
+def undo_to(
+    session_id: str,
+    *,
+    user_ordinal_from_end: int | None = None,
+    user_index: int | None = None,
+) -> dict[str, Any]:
+    """Rewind the transcript to a chosen user message, dropping it and everything after.
+
+    ``user_ordinal_from_end=0`` targets the last user message (identical to
+    :func:`undo_last`), ``1`` the one before it, and so on — ordinals count only
+    VISIBLE user turns, so hidden internal rows (delegation wakeups) never shift
+    what the operator picked in the UI. ``user_index`` is an absolute index into
+    ``session.messages`` and is validated to point at a visible user row.
+
+    Same lock ordering and watermark bookkeeping as :func:`undo_last`, so the
+    periodic checkpoint thread can never resurrect the rewound tail.
+    """
+    if user_ordinal_from_end is None and user_index is None:
+        raise ValueError("user_ordinal_from_end or user_index is required")
+    with _get_session_agent_lock(session_id):
+        s = get_session(session_id)
+        with LOCK:
+            s = SESSIONS.get(session_id, s)
+            if _live_active_stream_id(s) is not None:
+                raise ValueError("a turn is still running - stop it before rewinding")
+            history = s.messages or []
+            visible = [
+                i
+                for i, m in enumerate(history)
+                if m.get("role") == "user" and not is_hidden_transcript_row(m)
+            ]
+            if not visible:
+                raise ValueError("Nothing to undo.")
+            if user_index is not None:
+                target = int(user_index)
+                if target not in visible:
+                    raise ValueError(f"message index {target} is not a user message")
+            else:
+                k = int(user_ordinal_from_end)
+                if k < 0 or k >= len(visible):
+                    raise ValueError("no such user message to rewind to")
+                target = visible[len(visible) - 1 - k]
+
+            removed_text = _extract_text(history[target].get("content", ""))
+            removed_count = len(history) - target
+            s.messages = history[:target]
+            _stamp_intentional_shrink_generation(s, len(history), len(s.messages))
+            s.truncation_watermark = _truncation_watermark_for(s.messages)
+            s.truncation_boundary = s.truncation_watermark
+            if isinstance(getattr(s, "context_messages", None), list) and s.context_messages:
+                truncated = _truncate_context_before_row(s.context_messages, history[target])
+                if truncated is not None:
+                    s.context_messages = truncated
+                else:
+                    s.context_messages = _context_prefix_before_last_user(s.context_messages)
+        s.save()
+    preview = (removed_text[:60] + "...") if len(removed_text) > 60 else removed_text
+    return {
+        "removed_count": removed_count,
+        "removed_preview": preview,
+        "target_index": target,
+        "remaining_messages": len(s.messages),
+    }
+
+
 def session_status(session_id: str) -> dict[str, Any]:
     """Return a snapshot of session state for /status.
 

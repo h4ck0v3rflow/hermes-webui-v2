@@ -173,7 +173,8 @@ def test_fs_list_and_read_allows_parent_navigation(tmp_path: Path, monkeypatch: 
         h5, urlparse(f"/api/cockpit/fs/raw?session_id=s1&path={pdf_file}")
     ) is True
     assert h5.status == 206
-    assert h5.sent_headers.get("Content-Range") == f"bytes 0-3/{len(b'%PDF-1.4\n%test\n')}"
+    _pdf_len = len(b"%PDF-1.4\n%test\n")  # PEP 701 backslash-in-f-string is 3.12+; test.sh supports 3.11
+    assert h5.sent_headers.get("Content-Range") == f"bytes 0-3/{_pdf_len}"
     assert h5.wfile.getvalue() == b"%PDF"
 
     unicode_file = parent_dir / "video ｜ 🐦 test.mp4"

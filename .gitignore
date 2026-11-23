@@ -92,3 +92,6 @@ refs/
 static/v2/
 # The cockpit frontend lockfile IS tracked (root dev-tooling lockfile stays ignored).
 !web/package-lock.json
+
+# TypeScript incremental build artifact
+web/tsconfig.tsbuildinfo

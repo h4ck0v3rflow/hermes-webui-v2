@@ -38,7 +38,13 @@ function readHermesTerminalTheme() {
   };
 }
 
-export function TerminalPane({ sessionId }: { sessionId: string }) {
+export function TerminalPane({
+  sessionId,
+  active = true,
+}: {
+  sessionId: string;
+  active?: boolean;
+}) {
   const [mode, setMode] = useState<"feed" | "shell">("feed");
 
   return (
@@ -74,7 +80,7 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
       </div>
 
       {mode === "feed" ? (
-        <AgentCmdFeed sessionId={sessionId} />
+        <AgentCmdFeed sessionId={sessionId} active={active} />
       ) : (
         <InteractiveShellPane sessionId={sessionId} />
       )}

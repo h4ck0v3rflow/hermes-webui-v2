@@ -22,6 +22,33 @@ from api.sse_chunked import end_sse_headers
 
 MAX_FILE_BYTES = 262_144  # 256 KB
 DEBOUNCE_SECONDS = 0.15
+
+# Extensions that must preview in-app instead of downloading when served raw.
+_TEXT_LIKE_SUFFIXES = frozenset({
+    # mainstream languages
+    ".py", ".pyi", ".pyx", ".js", ".mjs", ".cjs", ".mts", ".cts", ".ts", ".tsx", ".jsx",
+    ".vue", ".svelte", ".astro", ".go", ".rs", ".java", ".kt", ".kts", ".scala", ".clj",
+    ".cljs", ".groovy", ".gradle", ".rb", ".php", ".pl", ".pm", ".lua", ".r", ".jl",
+    ".dart", ".ex", ".exs", ".erl", ".hrl", ".fs", ".fsx", ".vb", ".cs", ".swift", ".m",
+    ".mm", ".zig", ".nim", ".v", ".sv", ".vhd", ".pas", ".f90", ".asm", ".s", ".ld",
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".csproj", ".sln", ".props",
+    ".targets", ".sol", ".move", ".cairo", ".tf", ".tfvars", ".hcl", ".nix", ".bzl",
+    ".bazel", ".cmake", ".mk", ".mak", ".proto", ".graphql", ".gql",
+    # data / config
+    ".json", ".jsonl", ".ndjson", ".json5", ".jsonc", ".webmanifest", ".yml", ".yaml",
+    ".toml", ".ini", ".cfg", ".conf", ".config", ".properties", ".plist", ".env",
+    ".editorconfig", ".npmrc", ".yarnrc", ".prettierrc", ".eslintrc", ".flake8",
+    ".pylintrc", ".coveragerc", ".dockerignore", ".gitignore", ".gitattributes",
+    ".gitmodules", ".dockerfile", ".lock", ".sum", ".mod", ".workflow", ".service",
+    ".socket", ".timer", ".rules", ".desktop", ".htaccess", ".ovpn", ".pem", ".crt",
+    ".key", ".pub", ".csr", ".har", ".http", ".rest",
+    # docs / markup / shell
+    ".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc", ".org", ".tex", ".sty", ".bib",
+    ".pod", ".man", ".html", ".htm", ".xml", ".svg", ".css", ".scss", ".sass", ".less",
+    ".ejs", ".hbs", ".mustache", ".twig", ".j2", ".jinja", ".jinja2", ".erb", ".haml",
+    ".slim", ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd", ".sql", ".csv",
+    ".tsv", ".patch", ".diff", ".log", ".out", ".err", ".trace",
+})
 IGNORED_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", ".pytest_cache"})
 
 _EXT_LANGUAGE_MAP: dict[str, str] = {
@@ -88,13 +115,41 @@ def resolve_contained_file(root: Path, rel_path: str) -> Path:
     return candidate
 
 
-def read_bounded_text(file_path: Path) -> tuple[str, bool]:
-    """Read UTF-8 text from file_path capped at MAX_FILE_BYTES (256 KB)."""
+def _looks_binary(raw: bytes) -> bool:
+    """True for files that must not be rendered as text (mojibake in the preview)."""
+    if not raw:
+        return False
+    head = raw[:8192]
+    if b"\x00" in head:
+        return True
+    try:
+        head.decode("utf-8")
+        return False
+    except UnicodeDecodeError:
+        pass
+    try:
+        raw.decode("utf-8")
+        return False
+    except UnicodeDecodeError:
+        return True
+
+
+def read_bounded_text_ex(file_path: Path) -> tuple[str, bool, bool]:
+    """(content, truncated, binary). Binary files yield empty content, never mojibake."""
     raw = file_path.read_bytes()
+    binary = _looks_binary(raw)
     truncated = len(raw) > MAX_FILE_BYTES
     if truncated:
         raw = raw[:MAX_FILE_BYTES]
-    return raw.decode("utf-8", errors="replace"), truncated
+    if binary:
+        return "", truncated, True
+    return raw.decode("utf-8", errors="replace"), truncated, False
+
+
+def read_bounded_text(file_path: Path) -> tuple[str, bool]:
+    """Read UTF-8 text from file_path capped at MAX_FILE_BYTES (256 KB)."""
+    content, truncated, _binary = read_bounded_text_ex(file_path)
+    return content, truncated
 
 
 def compute_inserted_lines(previous: str, current: str) -> list[list[int]]:
@@ -382,7 +437,7 @@ def handle_files_read(handler, parsed) -> bool:
         bad(handler, "File not found", 404)
         return True
 
-    content, truncated = read_bounded_text(target)
+    content, truncated, binary = read_bounded_text_ex(target)
     rel_posix = target.relative_to(root).as_posix()
     j(
         handler,
@@ -391,6 +446,8 @@ def handle_files_read(handler, parsed) -> bool:
             "language": language_for_path(rel_posix),
             "content": content,
             "truncated": truncated,
+            "binary": binary,
+            "size": target.stat().st_size,
         },
     )
     return True
@@ -525,7 +582,7 @@ def handle_fs_read(handler, parsed) -> bool:
         bad(handler, "File not found", 404)
         return True
 
-    content, truncated = read_bounded_text(target)
+    content, truncated, binary = read_bounded_text_ex(target)
     j(
         handler,
         {
@@ -534,6 +591,8 @@ def handle_fs_read(handler, parsed) -> bool:
             "language": language_for_path(target.name),
             "content": content,
             "truncated": truncated,
+            "binary": binary,
+            "size": target.stat().st_size,
         },
     )
     return True
@@ -564,6 +623,13 @@ def handle_fs_raw(handler, parsed) -> bool:
     mime, _ = mimetypes.guess_type(target.name)
     if not mime:
         mime = "application/octet-stream"
+    # Source/config files must render in the preview, not download. Browsers treat
+    # text/x-python, application/json, etc. as downloads when navigated to directly,
+    # so serve them as plain text and skip the filename disposition.
+    suffix = target.suffix.lower()
+    text_like = suffix in _TEXT_LIKE_SUFFIXES or mime.startswith("text/")
+    if text_like:
+        mime = "text/plain; charset=utf-8"
     try:
         size = target.stat().st_size
         range_hdr = (handler.headers.get("Range") or "").strip() if hasattr(handler, "headers") else ""
@@ -602,12 +668,17 @@ def handle_fs_raw(handler, parsed) -> bool:
                 handler.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             handler.send_header("Content-Length", str(length))
             disp = "attachment" if download else "inline"
-            ascii_name = target.name.encode("ascii", "replace").decode("ascii").replace('"', "_")
-            utf8_name = quote(target.name, safe="")
-            handler.send_header(
-                "Content-Disposition",
-                f'{disp}; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}',
-            )
+            if text_like and not download:
+                # No filename parameter: some browsers treat `inline; filename=...` on a
+                # non-renderable MIME as a download prompt.
+                handler.send_header("Content-Disposition", "inline")
+            else:
+                ascii_name = target.name.encode("ascii", "replace").decode("ascii").replace('"', "_")
+                utf8_name = quote(target.name, safe="")
+                handler.send_header(
+                    "Content-Disposition",
+                    f'{disp}; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}',
+                )
             handler.send_header("Cache-Control", "no-store")
             handler.end_headers()
             remaining = length

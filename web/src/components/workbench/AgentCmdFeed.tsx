@@ -50,7 +50,16 @@ function readHermesTerminalTheme() {
   };
 }
 
-export function AgentCmdFeed({ sessionId }: { sessionId: string }) {
+export function AgentCmdFeed({
+  sessionId,
+  active = true,
+}: {
+  sessionId: string;
+  /** False while the CMD pane is hidden: the xterm buffer survives (the component stays
+   * mounted) but the SSE connection is released. Browsers cap HTTP/1.1 at 6 connections
+   * per origin and the shell already holds several, so a hidden pane must not hold one. */
+  active?: boolean;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const [connected, setConnected] = useState(false);
@@ -80,10 +89,20 @@ export function AgentCmdFeed({ sessionId }: { sessionId: string }) {
     term.writeln("\x1b[90m# Live agent command feed attached. Waiting for commands…\x1b[0m");
 
     const streamedRuns = new Set<string>();
-    const es = new EventSource(
-      `/api/cockpit/cmd/stream?session_id=${encodeURIComponent(sessionId)}`,
-      { withCredentials: true }
-    );
+    // The pane stays mounted while hidden (so the xterm scrollback survives), but it must
+    // not sit on an SSE slot: the shell already holds several of the browser's 6 allowed
+    // HTTP/1.1 connections, and a hidden pane holding one starves every fetch.
+    const es: EventSource = active
+      ? new EventSource(
+          `/api/cockpit/cmd/stream?session_id=${encodeURIComponent(sessionId)}`,
+          { withCredentials: true }
+        )
+      : ({
+          onopen: null,
+          onerror: null,
+          addEventListener: () => undefined,
+          close: () => undefined,
+        } as unknown as EventSource);
 
     es.onopen = () => setConnected(true);
     es.onerror = () => setConnected(false);
@@ -160,7 +179,7 @@ export function AgentCmdFeed({ sessionId }: { sessionId: string }) {
       term.dispose();
       termRef.current = null;
     };
-  }, [sessionId]);
+  }, [sessionId, active]);
 
   const settleApproval = async (choice: "once" | "session" | "deny") => {
     if (!pendingApproval) return;
