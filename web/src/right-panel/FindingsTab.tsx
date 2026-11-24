@@ -1,5 +1,7 @@
-import { Check, Copy, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, Copy, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { apiFetch } from "../lib/apiFetch";
 import { usePanelBridgeStore } from "../stores/panelBridgeStore";
 
@@ -30,6 +32,7 @@ export default function FindingsTab() {
   const defaultProgram = usePanelBridgeStore((s) => s.program || "default");
   const [program, setProgram] = useState(defaultProgram);
   const [findings, setFindings] = useState<HuntFinding[]>([]);
+  const [selectedFinding, setSelectedFinding] = useState<HuntFinding | null>(null);
   const [adding, setAdding] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -42,14 +45,24 @@ export default function FindingsTab() {
 
   useEffect(() => {
     setProgram(defaultProgram);
+    setSelectedFinding(null);
   }, [defaultProgram]);
 
   const loadFindings = useCallback(() => {
     void apiFetch<{ findings?: HuntFinding[] }>(
       `/api/cockpit/findings?program=${encodeURIComponent(program)}`
     )
-      .then((res) => setFindings(res?.findings ?? []))
-      .catch(() => setFindings([]));
+      .then((res) => {
+        const list = res?.findings ?? [];
+        setFindings(list);
+        setSelectedFinding((prev) =>
+          prev ? list.find((item) => item.id === prev.id) ?? null : null
+        );
+      })
+      .catch(() => {
+        setFindings([]);
+        setSelectedFinding(null);
+      });
   }, [program]);
 
   useEffect(() => {
@@ -88,27 +101,152 @@ export default function FindingsTab() {
       )}&id=${encodeURIComponent(id)}`,
       { method: "DELETE" }
     );
+    if (selectedFinding?.id === id) {
+      setSelectedFinding(null);
+    }
     loadFindings();
   };
 
-  const copyMarkdown = (f: HuntFinding) => {
-    const md = [
+  const buildReportMarkdown = (f: HuntFinding) => {
+    const metaLines = [
+      `**Severity:** ${f.severity.toUpperCase()}`,
+      `**Status:** ${f.status}`,
+      f.cwe ? `**CWE:** ${f.cwe}` : "",
+      f.target_url ? `**Target:** \`${f.target_url}\`` : "",
+      f.parameter ? `**Parameter:** \`${f.parameter}\`` : "",
+      f.poc_path ? `**PoC:** \`${f.poc_path}\`` : "",
+    ].filter(Boolean);
+
+    return [
       `# ${f.title}`,
-      `**Severity:** ${f.severity.toUpperCase()}${f.cwe ? ` · **CWE:** ${f.cwe}` : ""}`,
-      f.target_url ? `**Target:** ${f.target_url}` : "",
+      "",
+      metaLines.join(" · "),
       "",
       "## Steps to Reproduce",
+      "",
       f.steps_to_reproduce || "_TBD_",
       "",
       "## Impact",
+      "",
       f.impact || "_TBD_",
-    ]
-      .filter(Boolean)
-      .join("\n");
-    void navigator.clipboard?.writeText(md);
+    ].join("\n");
+  };
+
+  const copyMarkdown = (f: HuntFinding) => {
+    void navigator.clipboard?.writeText(buildReportMarkdown(f));
     setCopiedId(f.id);
     setTimeout(() => setCopiedId(null), 1500);
   };
+
+  if (selectedFinding) {
+    return (
+      <div className="flex flex-1 flex-col min-h-0 bg-[var(--oh-canvas)]">
+        <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-[var(--oh-border)] bg-[var(--oh-surface)] px-2.5">
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              type="button"
+              onClick={() => setSelectedFinding(null)}
+              title="Back to findings"
+              aria-label="Back to findings"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--oh-muted)] hover:bg-[var(--oh-elevated)] hover:text-[var(--oh-text)] cursor-pointer transition-colors"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+            </button>
+            <span
+              className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+                SEVERITY_COLORS[selectedFinding.severity]
+              }`}
+            >
+              {selectedFinding.severity}
+            </span>
+            <span className="truncate font-mono text-[11px] text-[var(--oh-muted)]">
+              {selectedFinding.id}.md
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => copyMarkdown(selectedFinding)}
+              title="Copy HackerOne Markdown report"
+              className="inline-flex items-center gap-1 rounded border border-[var(--oh-border)] bg-[var(--oh-elevated)] px-2 py-0.5 text-[10px] text-[var(--oh-text)] cursor-pointer"
+            >
+              {copiedId === selectedFinding.id ? (
+                <>
+                  <Check className="h-3 w-3 text-emerald-400" />
+                  <span>Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3 w-3" />
+                  <span>Copy Report</span>
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDelete(selectedFinding.id)}
+              title="Delete finding"
+              className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--oh-muted)] hover:text-red-400 cursor-pointer"
+            >
+              <Trash2 className="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 text-xs leading-relaxed text-[var(--oh-text)]">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              h1: ({ children }) => (
+                <h1 className="mb-3 text-base font-semibold text-[var(--oh-text)] border-b border-[var(--oh-border)] pb-2">
+                  {children}
+                </h1>
+              ),
+              h2: ({ children }) => (
+                <h2 className="mt-4 mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--oh-muted)]">
+                  {children}
+                </h2>
+              ),
+              p: ({ children }) => (
+                <p className="mb-2.5 text-xs leading-relaxed text-[var(--oh-text)]">
+                  {children}
+                </p>
+              ),
+              ul: ({ children }) => (
+                <ul className="mb-3 list-disc pl-5 space-y-1 text-xs">{children}</ul>
+              ),
+              ol: ({ children }) => (
+                <ol className="mb-3 list-decimal pl-5 space-y-1 text-xs">{children}</ol>
+              ),
+              code: ({ children }) => (
+                <code className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[11px] text-emerald-300">
+                  {children}
+                </code>
+              ),
+              pre: ({ children }) => (
+                <pre className="mb-3 overflow-x-auto rounded-md border border-[var(--oh-border)] bg-[var(--oh-surface)] p-2.5 font-mono text-[11px]">
+                  {children}
+                </pre>
+              ),
+              a: ({ href, children }) => (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-emerald-400 underline hover:text-emerald-300"
+                >
+                  {children}
+                </a>
+              ),
+            }}
+          >
+            {buildReportMarkdown(selectedFinding)}
+          </ReactMarkdown>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-1 flex-col min-h-0 bg-[var(--oh-canvas)]">
@@ -208,7 +346,16 @@ export default function FindingsTab() {
           findings.map((f) => (
             <div
               key={f.id}
-              className="rounded-lg border border-[var(--oh-border)] bg-[var(--oh-surface)] p-3 space-y-1.5"
+              role="button"
+              tabIndex={0}
+              onClick={() => setSelectedFinding(f)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setSelectedFinding(f);
+                }
+              }}
+              className="rounded-lg border border-[var(--oh-border)] bg-[var(--oh-surface)] p-3 space-y-1.5 cursor-pointer hover:border-emerald-500/40 transition-colors"
             >
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 min-w-0">
@@ -229,7 +376,10 @@ export default function FindingsTab() {
                 <div className="flex items-center gap-1 shrink-0">
                   <button
                     type="button"
-                    onClick={() => copyMarkdown(f)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      copyMarkdown(f);
+                    }}
                     title="Copy HackerOne Markdown report"
                     className="inline-flex items-center gap-1 rounded border border-[var(--oh-border)] bg-[var(--oh-elevated)] px-2 py-0.5 text-[10px] text-[var(--oh-text)] cursor-pointer"
                   >
@@ -247,7 +397,10 @@ export default function FindingsTab() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleDelete(f.id)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleDelete(f.id);
+                    }}
                     title="Delete finding"
                     className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--oh-muted)] hover:text-red-400 cursor-pointer"
                   >

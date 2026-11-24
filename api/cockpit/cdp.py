@@ -52,6 +52,10 @@ class WsClient:
         self.path = parsed.path + (("?" + parsed.query) if parsed.query else "")
         self.sock = socket.create_connection((self.host, self.port), timeout=timeout)
         self.sock.settimeout(None)
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
         self._send_lock = threading.Lock()
         self._handshake()
 
@@ -460,8 +464,10 @@ def _hp_json(path: str, payload: dict | None = None, timeout: float = 10.0):
         return 0, None
 
 
-def _active_browser_session(project_id: int, profile: str = "") -> int:
-    """Browser session id for CDP (creating one with `profile` when absent)."""
+def _active_browser_session(
+    project_id: int, profile: str = "", *, create_if_missing: bool = True
+) -> int:
+    """Browser session id for CDP (optionally creating one with `profile` when absent)."""
     _st, data = _hp_json(f"/projects/{project_id}/browser-sessions", timeout=5)
     items = []
     if isinstance(data, list):
@@ -475,6 +481,8 @@ def _active_browser_session(project_id: int, profile: str = "") -> int:
     for item in items:
         if isinstance(item, dict) and not profile and (item.get("id") or item.get("session_id")):
             return int(item.get("id") or item.get("session_id"))
+    if not create_if_missing:
+        return 0
     for candidate in ([profile] if profile else []) + ["default", "cockpit"]:
         if not candidate:
             continue
@@ -488,9 +496,11 @@ def _active_browser_session(project_id: int, profile: str = "") -> int:
     return 0
 
 
-def cdp_endpoint(project_id: int, profile: str = "") -> tuple[str, int] | None:
+def cdp_endpoint(
+    project_id: int, profile: str = "", *, create_if_missing: bool = True
+) -> tuple[str, int] | None:
     """Ask HuntProxy to enable CDP and return the page WebSocket URL."""
-    sid = _active_browser_session(project_id, profile)
+    sid = _active_browser_session(project_id, profile, create_if_missing=create_if_missing)
     if not sid:
         return None
     st, info = _hp_json(
@@ -532,24 +542,34 @@ def cdp_endpoint(project_id: int, profile: str = "") -> tuple[str, int] | None:
     return str(preferred["webSocketDebuggerUrl"]), target_sid
 
 
-def get_session(project_id: int, profile: str = "") -> CdpSession | None:
+def get_session(
+    project_id: int, profile: str = "", *, create_if_missing: bool = True
+) -> CdpSession | None:
     """Return a live CDP session for this project/profile, starting one if needed."""
+    stale: CdpSession | None = None
     with _sessions_lock:
         sess = _sessions.get(project_id)
         if sess and sess.alive():
             return sess
         if sess:
-            sess.stop()
-        target = cdp_endpoint(project_id, profile)
-        if not target:
-            return None
-        ws_url, sid = target
-        sess = CdpSession(project_id, ws_url, sid)
-        if not sess.start():
-            _sessions.pop(project_id, None)
-            return None
-        _sessions[project_id] = sess
-        return sess
+            stale = _sessions.pop(project_id, None)
+    if stale:
+        stale.stop()
+
+    target = cdp_endpoint(project_id, profile, create_if_missing=create_if_missing)
+    if not target:
+        return None
+    ws_url, sid = target
+    new_sess = CdpSession(project_id, ws_url, sid)
+    if not new_sess.start():
+        return None
+    with _sessions_lock:
+        existing = _sessions.get(project_id)
+        if existing and existing.alive():
+            new_sess.stop()
+            return existing
+        _sessions[project_id] = new_sess
+    return new_sess
 
 
 def drop_session(project_id: int) -> None:

@@ -175,7 +175,7 @@ def test_browser_action_cdp_and_offline_degradation(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         cockpit_browser,
         "_hp_get_active_browser_session",
-        lambda pid: {"id": "bs-1", "agent_control": True},
+        lambda pid, profile=None: {"id": "bs-1", "agent_control": True},
     )
     monkeypatch.setattr(
         cockpit_browser,
@@ -185,6 +185,14 @@ def test_browser_action_cdp_and_offline_degradation(monkeypatch: pytest.MonkeyPa
             "hosted_devtools_url": "http://127.0.0.1:17892/devtools/bs-1",
             "ssh_forward_command": "ssh -L 9222:127.0.0.1:9222 vps",
         },
+    )
+    from types import SimpleNamespace
+    from api.cockpit import cdp as cockpit_cdp
+
+    monkeypatch.setattr(
+        cockpit_cdp,
+        "get_session",
+        lambda pid, prof="default": SimpleNamespace(hp_session_id=99),
     )
     h_cdp = _FakeHandler(
         json.dumps({"session_id": "s1", "project_id": 2, "action": "cdp", "op": "enable"}).encode("utf-8")
@@ -196,3 +204,48 @@ def test_browser_action_cdp_and_offline_degradation(monkeypatch: pytest.MonkeyPa
     assert cdp_data["paused"] is True
     assert "devtools" in cdp_data["hosted_devtools_url"]
     assert cdp_data["ssh_forward_command"].startswith("ssh ")
+
+
+def test_browser_passive_actions_do_not_spawn_browser(monkeypatch):
+    from api.cockpit import browser as cockpit_browser
+    from api.cockpit import cdp as cockpit_cdp
+    from api.cockpit import huntproxy as cockpit_hp
+
+    monkeypatch.setattr(cockpit_hp, "validate_project_id", lambda raw: (True, 2, {"id": 2}))
+    monkeypatch.setattr(cockpit_browser, "_hp_get_active_browser_session", lambda pid, profile=None: None)
+
+    ensure_calls = []
+    monkeypatch.setattr(
+        cockpit_browser,
+        "_hp_ensure_browser_session",
+        lambda pid, profile="default": ensure_calls.append((pid, profile)) or {"id": "bs-new"},
+    )
+
+    h_list = _FakeHandler(
+        json.dumps({"session_id": "s1", "project_id": 2, "action": "pages", "op": "list"}).encode("utf-8")
+    )
+    assert cockpit_routes.handle_cockpit_post(h_list, urlparse("/api/cockpit/browser/action")) is True
+    assert h_list.status == 200
+    assert json.loads(h_list.wfile.getvalue().decode("utf-8")).get("no_browser") is True
+    assert ensure_calls == []
+
+    h_status = _FakeHandler(
+        json.dumps({"session_id": "s1", "project_id": 2, "action": "cdp", "op": "status"}).encode("utf-8")
+    )
+    assert cockpit_routes.handle_cockpit_post(h_status, urlparse("/api/cockpit/browser/action")) is True
+    assert h_status.status == 200
+    assert json.loads(h_status.wfile.getvalue().decode("utf-8")).get("paused") is False
+    assert ensure_calls == []
+
+    posted_create = []
+    monkeypatch.setattr(
+        cockpit_cdp,
+        "_hp_json",
+        lambda path, payload=None, timeout=10.0: (
+            posted_create.append((path, payload)) or (200, [])
+            if payload is None
+            else (201, {"id": 99})
+        ),
+    )
+    assert cockpit_cdp.get_session(777, "stest", create_if_missing=False) is None
+    assert all(p is None for _, p in posted_create)

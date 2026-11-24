@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import { RightPanelApp } from "./right-panel/RightPanelApp";
+import { CodeFileEditor } from "./editor/CodeFileEditor";
 import {
   usePanelBridgeStore,
   type ExtraPanelTab,
@@ -55,6 +56,7 @@ function mountExtraTabs() {
   createRoot(mountEl).render(
     <StrictMode>
       <RightPanelApp />
+      <CodeFileEditor />
     </StrictMode>
   );
 }

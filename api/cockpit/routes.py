@@ -260,6 +260,10 @@ def handle_cockpit_post(handler, parsed) -> bool:
         from api.cockpit.proxy import handle_proxy_replay
 
         return handle_proxy_replay(handler)
+    if parsed.path == "/api/cockpit/fs/save":
+        from api.cockpit.files import handle_fs_save
+
+        return handle_fs_save(handler)
     if parsed.path == "/api/cockpit/traffic/project":
         from api.cockpit.huntproxy import handle_traffic_select_project
 

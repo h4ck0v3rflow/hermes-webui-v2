@@ -53,7 +53,7 @@ def handle_live_stream(handler, parsed) -> bool:
         from api.cockpit.browser import _session_profile
 
         prof = _session_profile(_sid)
-    sess = cdp.get_session(pid, prof)
+    sess = cdp.get_session(pid, prof, create_if_missing=False)
     if sess is None:
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -141,7 +141,7 @@ def handle_input(handler) -> bool:
         from api.cockpit.browser import _session_profile
 
         prof = _session_profile(_sid)
-    sess = cdp.get_session(pid, prof)
+    sess = cdp.get_session(pid, prof, create_if_missing=False)
     if sess is None or not sess.alive():
         j(handler, {"ok": False, "offline": True, "message": "CDP session unavailable"})
         return True

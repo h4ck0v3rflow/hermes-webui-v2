@@ -108,6 +108,7 @@ export default function BrowserTab({
     history: [],
   });
   const [hpMode, setHpMode] = useState<"connecting" | "huntproxy" | "offline">("connecting");
+  const [hpBrowserActive, setHpBrowserActive] = useState(false);
   const [hpProjectId, setHpProjectId] = useState<number | null>(null);
   const [control, setControl] = useState<BrowserControlState>({
     paused: false,
@@ -141,7 +142,8 @@ export default function BrowserTab({
   });
   const liveEsRef = useRef<EventSource | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
-  const liveMode = Boolean(control.paused) && hpProjectId !== null;
+  const isEditingUrlRef = useRef(false);
+  const liveMode = Boolean(control.paused) && hpProjectId !== null && hpBrowserActive;
 
   useEffect(() => {
     void apiFetch<BrowserStatePayload>(
@@ -150,7 +152,7 @@ export default function BrowserTab({
       .then((res) => {
         if (res) {
           setState(res);
-          if (res.url) setUrlInput(res.url);
+          if (res.url && !isEditingUrlRef.current) setUrlInput(res.url);
         }
       })
       .catch(() => {});
@@ -166,7 +168,7 @@ export default function BrowserTab({
         const next = JSON.parse((ev as MessageEvent).data) as BrowserStatePayload;
         if (next) {
           setState(next);
-          if (next.url) setUrlInput(next.url);
+          if (next.url && !isEditingUrlRef.current) setUrlInput(next.url);
           setSelectedHistoryIdx(null);
         }
       } catch {
@@ -185,9 +187,17 @@ export default function BrowserTab({
         }
         if (t === "offline") {
           setHpMode("offline");
+          setHpBrowserActive(false);
+          return;
+        }
+        if (t === "no_browser") {
+          setHpMode("huntproxy");
+          setHpBrowserActive(false);
+          setControl((prev) => ({ ...prev, paused: false }));
           return;
         }
         if (t === "control") {
+          setHpBrowserActive(true);
           const paused = Boolean(data.paused);
           setControl({
             paused,
@@ -201,10 +211,12 @@ export default function BrowserTab({
           return;
         }
         if (t === "pages" && Array.isArray(data.pages)) {
+          setHpBrowserActive(true);
           setPages(data.pages as BrowserPageInfo[]);
           return;
         }
         if (t === "frame") {
+          setHpBrowserActive(true);
           const jpeg = String(data.jpeg_b64 || "");
           const frameMime = String((data as { mime_type?: string }).mime_type || "image/png");
           const frameUrl = String(data.url || "");
@@ -214,7 +226,7 @@ export default function BrowserTab({
               ? jpeg
               : `data:${frameMime};base64,${jpeg}`
             : "";
-          if (frameUrl) setUrlInput(frameUrl);
+          if (frameUrl && !isEditingUrlRef.current) setUrlInput(frameUrl);
           setSelectedHistoryIdx(null);
           setState((prev) => {
             const nextUrl = frameUrl || prev.url;
@@ -576,6 +588,12 @@ export default function BrowserTab({
           <input
             type="text"
             value={urlInput}
+            onFocus={() => {
+              isEditingUrlRef.current = true;
+            }}
+            onBlur={() => {
+              isEditingUrlRef.current = false;
+            }}
             onChange={(e) => setUrlInput(e.target.value)}
             placeholder="Enter URL or wait for agent…"
             className="w-full min-w-0 bg-transparent text-[11px] font-mono text-[var(--oh-text)] placeholder:text-[var(--oh-muted)]"
@@ -596,14 +614,16 @@ export default function BrowserTab({
         {/* Take Control / Hand Back pill */}
         <button
           type="button"
-          disabled={switchingLease}
+          disabled={switchingLease || (hpMode === "huntproxy" && !hpBrowserActive)}
           onClick={() => void toggleLease()}
           title={
-            isHumanControl
+            hpMode === "huntproxy" && !hpBrowserActive
+              ? "Waiting for agent to launch browser in bug hunting workflow"
+              : isHumanControl
               ? "Hand control back to AGENT"
               : "Take Control (pauses agent browser actions)"
           }
-          className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 text-[10px] font-semibold cursor-pointer transition-colors ${
+          className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 text-[10px] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${
             isHumanControl
               ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
               : "border-emerald-500/30 bg-[var(--oh-elevated)] text-[var(--oh-text)] hover:border-emerald-500/50"
@@ -705,12 +725,18 @@ export default function BrowserTab({
         <div className="flex items-center gap-1.5 min-w-0">
           <span
             className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-              hpMode === "huntproxy" ? "bg-emerald-400" : "bg-zinc-500"
+              hpMode === "huntproxy"
+                ? hpBrowserActive
+                  ? "bg-emerald-400"
+                  : "bg-amber-400"
+                : "bg-zinc-500"
             }`}
           />
           <span className="font-mono truncate text-[var(--oh-text)]">
             {hpMode === "huntproxy"
-              ? displayAction || `HuntProxy Chromium #${hpProjectId ?? ""}`
+              ? hpBrowserActive
+                ? displayAction || `HuntProxy Chromium #${hpProjectId ?? ""}`
+                : "No active browser — opens when agent uses browser"
               : hpMode === "offline"
               ? "HuntProxy offline (expected on PC dev)"
               : "Connecting…"}
@@ -783,9 +809,11 @@ export default function BrowserTab({
               const p = framePoint(e);
               if (!p) return;
               e.currentTarget.focus();
-              sendInput({ kind: "click", x: p.x, y: p.y, button: e.button === 2 ? "right" : "left" });
+              const button = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
+              sendInput({ kind: "click", x: p.x, y: p.y, button });
             }}
             onWheel={(e) => {
+              e.preventDefault();
               const p = framePoint(e);
               if (!p) return;
               flushWheel(p.x, p.y, e.deltaX, e.deltaY);
@@ -832,6 +860,8 @@ export default function BrowserTab({
             <p className="text-xs font-medium text-[var(--oh-text)]">
               {displayUrl
                 ? `Active page: ${shortHost(displayUrl)}`
+                : hpMode === "huntproxy" && !hpBrowserActive
+                ? "Agent Browser Standby"
                 : "Live Agent Browser"}
             </p>
             <p className="max-w-xs text-[11px] leading-relaxed text-[var(--oh-muted)]">
@@ -839,6 +869,8 @@ export default function BrowserTab({
                 ? `Tracked ${displayUrl}. Live viewport screenshots stream here when HuntProxy Chromium captures a frame.`
                 : hpMode === "offline"
                 ? "HuntProxy is offline on local PC dev. On the VPS, HuntProxy Chromium frames, tabs, and Take Control stream here live."
+                : !hpBrowserActive
+                ? "No browser is running yet. It opens automatically when Hermes uses the browser in a bug hunting workflow."
                 : "Waiting for HuntProxy Chromium frames and browser events."}
             </p>
             {displayUrl && (

@@ -564,26 +564,235 @@ function buildPerfAndBridgeScript() {
     });
   }
 
+  var VISUAL_PREVIEW_EXTS = {
+    '.html': 'html', '.htm': 'html', '.xhtml': 'html',
+    '.svg': 'svg',
+    '.md': 'md', '.markdown': 'md', '.mdx': 'md',
+    '.csv': 'csv'
+  };
+
+  function getFileExt(filePath) {
+    var ext = (typeof window.fileExt === 'function') ? window.fileExt(filePath) : '';
+    if (!ext) {
+      var dot = String(filePath || '').lastIndexOf('.');
+      ext = dot >= 0 ? String(filePath).slice(dot).toLowerCase() : '';
+    }
+    return String(ext || '').toLowerCase();
+  }
+
+  function getVisualPreviewKind(filePath) {
+    return VISUAL_PREVIEW_EXTS[getFileExt(filePath)] || null;
+  }
+
   var previewModeState = {
     path: '',
     content: null,
-    mode: 'styled'
+    savedContent: null,
+    mode: 'styled',
+    isExternal: false,
+    readOnly: false,
+    dirty: false,
+    saving: false,
+    justSaved: false,
+    binary: false,
+    rawUrl: '',
+    editorBoundKey: '',
+    loadSeq: 0
   };
+
+  function syncSaveButtonUi() {
+    var btn = document.getElementById('btnEditFile');
+    if (!btn) return;
+    var canEdit = previewModeState.content !== null && !previewModeState.binary && !previewModeState.readOnly;
+    var showSave = canEdit && (previewModeState.mode === 'edit' || previewModeState.dirty || previewModeState.justSaved || previewModeState.saving);
+    btn.style.display = showSave ? 'inline-flex' : 'none';
+    if (!showSave) return;
+    if (previewModeState.saving) {
+      btn.textContent = 'Saving...';
+      btn.style.color = 'var(--blue)';
+    } else if (previewModeState.dirty) {
+      btn.innerHTML = '&#128190; Save*';
+      btn.title = 'Save changes (Ctrl+S)';
+      btn.style.color = 'var(--blue)';
+    } else if (previewModeState.justSaved) {
+      btn.textContent = 'Saved';
+      btn.title = 'Saved (Ctrl+S)';
+      btn.style.color = 'var(--green, #4ade80)';
+    } else {
+      btn.innerHTML = '&#128190; Save';
+      btn.title = 'Save file (Ctrl+S)';
+      btn.style.color = '';
+    }
+  }
 
   function syncPreviewModeTabsUi() {
     var wrap = document.getElementById('cockpitPreviewModeTabs');
     var styledBtn = document.getElementById('btnPreviewStyled');
+    var editBtn = document.getElementById('btnPreviewEdit');
     var rawBtn = document.getElementById('btnPreviewRaw');
-    var hasText = previewModeState.content !== null;
+    var visualBtn = document.getElementById('btnPreviewVisual');
+    var hasText = previewModeState.content !== null && !previewModeState.binary;
+    var canEdit = hasText && !previewModeState.readOnly;
+    var hasVisual = hasText && Boolean(getVisualPreviewKind(previewModeState.path));
     if (wrap) wrap.hidden = !hasText;
     if (styledBtn) {
       styledBtn.classList.toggle('active', previewModeState.mode === 'styled');
       styledBtn.setAttribute('aria-selected', previewModeState.mode === 'styled' ? 'true' : 'false');
     }
+    if (editBtn) {
+      editBtn.hidden = !canEdit;
+      editBtn.classList.toggle('active', previewModeState.mode === 'edit');
+      editBtn.setAttribute('aria-selected', previewModeState.mode === 'edit' ? 'true' : 'false');
+    }
     if (rawBtn) {
       rawBtn.classList.toggle('active', previewModeState.mode === 'raw');
       rawBtn.setAttribute('aria-selected', previewModeState.mode === 'raw' ? 'true' : 'false');
     }
+    if (visualBtn) {
+      visualBtn.hidden = !hasVisual;
+      visualBtn.classList.toggle('active', previewModeState.mode === 'preview');
+      visualBtn.setAttribute('aria-selected', previewModeState.mode === 'preview' ? 'true' : 'false');
+    }
+    syncSaveButtonUi();
+  }
+
+  function showCodeEditorHost(visible) {
+    var host = document.getElementById('cockpitCodeEditorHost');
+    var pc = document.getElementById('previewCode');
+    if (host) host.style.display = visible ? 'flex' : 'none';
+    if (visible && pc) pc.style.display = 'none';
+  }
+
+  function buildHtmlSrcdoc(filePath, content) {
+    var kind = getVisualPreviewKind(filePath);
+    var text = String(content || '');
+    if (kind === 'svg') {
+      return '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:16px;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fff;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}</style></head><body>' + text + '</body></html>';
+    }
+    if (!/<base\b/i.test(text)) {
+      if (/<head(?:\s[^>]*)?>/i.test(text)) {
+        text = text.replace(/(<head\b[^>]*>)/i, '$1<base target="_blank">');
+      } else if (/<html(?:\s[^>]*)?>/i.test(text)) {
+        text = text.replace(/(<html\b[^>]*>)/i, '$1<head><base target="_blank"></head>');
+      } else {
+        text = '<!doctype html><html><head><meta charset="utf-8"><base target="_blank"></head><body>' + text + '</body></html>';
+      }
+    }
+    var emptyFallbackScript = '<script>(function(){function chk(){try{var b=document.body;if(!b)return;var txt=(b.innerText||"").trim();var media=b.querySelector("img,svg,canvas,video,audio,iframe,input,button,table,h1,h2,h3,p");if(!txt&&!media){var d=document.createElement("div");d.setAttribute("style","font-family:system-ui,-apple-system,sans-serif;padding:20px;margin:20px auto;max-width:460px;border:1px solid #cbd5e1;border-radius:10px;background:#f8fafc;color:#334155;font-size:13px;line-height:1.5");var s=document.createElement("strong");s.setAttribute("style","display:block;margin-bottom:6px;color:#0f172a");s.textContent="No static HTML content to display";var p=document.createElement("span");p.textContent="This file rendered an empty body (for example, an unbundled Vite/React entry like <div id=root> that requires a dev server). Switch to Styled or Raw to edit it.";d.appendChild(s);d.appendChild(p);b.appendChild(d);}}catch(_){}}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",function(){setTimeout(chk,80);});}else{setTimeout(chk,80);}})();<' + '/script>';
+    var bodyCloseRe = new RegExp('<' + '/body>', 'i');
+    if (bodyCloseRe.test(text)) {
+      text = text.replace(bodyCloseRe, emptyFallbackScript + '<' + '/body>');
+    } else {
+      text += emptyFallbackScript;
+    }
+    return text;
+  }
+
+  function renderHtmlVisualPreview(filePath, content, rawUrl) {
+    if (typeof window.showPreview === 'function') window.showPreview('html');
+    showCodeEditorHost(false);
+    var wrap = document.getElementById('previewHtmlWrap');
+    if (wrap) wrap.style.display = 'flex';
+    var htmlFrame = document.getElementById('previewHtmlIframe');
+    if (!htmlFrame) return;
+    if (typeof content === 'string') {
+      htmlFrame.removeAttribute('src');
+      htmlFrame.srcdoc = buildHtmlSrcdoc(filePath, content);
+    } else if (rawUrl) {
+      htmlFrame.removeAttribute('srcdoc');
+      var inlineUrl = rawUrl + (rawUrl.indexOf('?') >= 0 ? '&' : '?') + 'inline=1';
+      htmlFrame.src = inlineUrl;
+    }
+  }
+
+  window.cockpitSaveCurrentFile = async function() {
+    if (previewModeState.content === null || previewModeState.binary || previewModeState.readOnly) return false;
+    var st = getLegacyState();
+    var sid = st && st.session ? st.session.session_id : '';
+    if (!sid || !previewModeState.path) return false;
+    var content = previewModeState.content;
+    if (window.cockpitEditor && typeof window.cockpitEditor.getContent === 'function' && previewModeState.editorBoundKey) {
+      content = window.cockpitEditor.getContent();
+      previewModeState.content = content;
+    }
+    previewModeState.saving = true;
+    syncSaveButtonUi();
+    var endpoint = previewModeState.isExternal ? '/api/cockpit/fs/save' : '/api/file/save';
+    try {
+      var resp = await fetch(endpoint, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sid,
+          path: previewModeState.path,
+          content: content
+        })
+      });
+      if (!resp.ok) {
+        var errData = await resp.json().catch(function() { return {}; });
+        if (typeof window.showToast === 'function') {
+          window.showToast(errData.error || 'Save failed', 2800, 'error');
+        }
+        return false;
+      }
+      previewModeState.savedContent = content;
+      previewModeState.dirty = false;
+      previewModeState.justSaved = true;
+      if (window.cockpitEditor && typeof window.cockpitEditor.markClean === 'function') {
+        window.cockpitEditor.markClean(content);
+      }
+      if (typeof window.showToast === 'function') {
+        var fname = previewModeState.path.split(/[\\\\/]/).pop() || previewModeState.path;
+        window.showToast('Saved ' + fname, 1600);
+      }
+      if (previewModeState.mode === 'preview') {
+        renderActiveMode();
+      }
+      setTimeout(function() {
+        previewModeState.justSaved = false;
+        syncSaveButtonUi();
+      }, 1500);
+      return true;
+    } catch (_) {
+      if (typeof window.showToast === 'function') window.showToast('Save failed', 2600, 'error');
+      return false;
+    } finally {
+      previewModeState.saving = false;
+      syncSaveButtonUi();
+    }
+  };
+
+  function openOrUpdateCodeEditor(mode) {
+    var key = previewModeState.path + '#' + String(previewModeState.loadSeq);
+    if (!window.cockpitEditor || typeof window.cockpitEditor.open !== 'function') {
+      return false;
+    }
+    if (typeof window.showPreview === 'function') window.showPreview('code');
+    showCodeEditorHost(true);
+    var cmMode = mode === 'raw' ? 'raw' : (mode === 'edit' ? 'edit' : 'styled');
+    if (previewModeState.editorBoundKey !== key) {
+      previewModeState.editorBoundKey = key;
+      window.cockpitEditor.open({
+        path: previewModeState.path,
+        content: previewModeState.content || '',
+        mode: cmMode,
+        readOnly: Boolean(previewModeState.readOnly),
+        onChange: function(nextContent, dirty) {
+          previewModeState.content = nextContent;
+          previewModeState.dirty = Boolean(dirty);
+          previewModeState.justSaved = false;
+          syncSaveButtonUi();
+        },
+        onSave: function() {
+          void window.cockpitSaveCurrentFile();
+        }
+      });
+    } else if (typeof window.cockpitEditor.setMode === 'function') {
+      window.cockpitEditor.setMode(cmMode);
+    }
+    syncSaveButtonUi();
+    return true;
   }
 
   // Prism is loaded from a CDN and its autoloader silently no-ops when the network or CSP
@@ -648,64 +857,85 @@ function buildPerfAndBridgeScript() {
     el.dataset.ckHighlighted = '1';
   }
 
-  function renderStyledContent(filePath, content) {
-    var ext = (typeof window.fileExt === 'function') ? window.fileExt(filePath) : '';
-    if (!ext) {
-      var dot = String(filePath || '').lastIndexOf('.');
-      ext = dot >= 0 ? String(filePath).slice(dot).toLowerCase() : '';
-    }
-    var pc0 = document.getElementById('previewCode');
-    if (pc0) delete pc0.dataset.ckHighlighted;
-    var isMd = (typeof MD_EXTS !== 'undefined' && MD_EXTS.has(ext)) || ext === '.md' || ext === '.markdown' || ext === '.mdx';
-    if (isMd && typeof window.renderMarkdownPreviewContent === 'function') {
-      window.renderMarkdownPreviewContent({ content: content });
-      return;
-    }
-    if (ext === '.csv' && typeof window.renderCsvPreviewContent === 'function') {
-      if (window.renderCsvPreviewContent(filePath, content)) return;
-    }
-    // Render code directly instead of delegating to the legacy renderer: that one awaits the
-    // Prism CDN autoloader, so the pane sat as raw text for seconds before styling (or stayed
-    // unstyled forever when the CDN is blocked). This path is synchronous — styled on paint.
-    if (typeof window.showPreview === 'function') window.showPreview('code');
-    var pc = document.getElementById('previewCode');
-    if (pc) {
-      pc.textContent = content || '';
-      pc.scrollTop = 0;
-      if (content && content.length <= 400000) cockpitFallbackHighlight(pc, content);
-      return;
-    }
-    if (typeof window.showPreview === 'function') window.showPreview('code');
-    var pc2 = document.getElementById('previewCode');
-    if (pc2) {
-      pc2.textContent = content;
-      cockpitFallbackHighlight(pc2, content || '');
-    }
-  }
-
-
-  window.cockpitSetPreviewMode = function(mode) {
-    if (previewModeState.content === null) return;
-    // Don't throw away in-progress typing when the operator flips tabs.
-    if (window.cockpitEditor && typeof window.cockpitEditor.isEditable === 'function'
-        && window.cockpitEditor.isEditable()
-        && typeof window.cockpitEditor.getContent === 'function') {
-      previewModeState.content = window.cockpitEditor.getContent();
-    }
-    previewModeState.mode = mode === 'raw' ? 'raw' : 'styled';
-    syncPreviewModeTabsUi();
-    if (previewModeState.mode === 'raw') {
-      if (typeof window.showPreview === 'function') window.showPreview('code');
-      var pc = document.getElementById('previewCode');
-      if (pc) pc.textContent = previewModeState.content;
-    } else {
+  function renderActiveMode() {
+    if (previewModeState.content === null || previewModeState.binary) return;
+    var mode = previewModeState.mode;
+    if (mode === 'preview') {
+      var kind = getVisualPreviewKind(previewModeState.path);
+      if (kind === 'html' || kind === 'svg') {
+        renderHtmlVisualPreview(previewModeState.path, previewModeState.content, previewModeState.rawUrl);
+        syncSaveButtonUi();
+        return;
+      }
+      showCodeEditorHost(false);
       previewModeState.suppressCapture = true;
       try {
-        renderStyledContent(previewModeState.path, previewModeState.content);
+        if (kind === 'md' && typeof window.renderMarkdownPreviewContent === 'function') {
+          window.renderMarkdownPreviewContent({ content: previewModeState.content });
+          syncSaveButtonUi();
+          return;
+        }
+        if (kind === 'csv' && typeof window.renderCsvPreviewContent === 'function') {
+          if (window.renderCsvPreviewContent(previewModeState.path, previewModeState.content)) {
+            syncSaveButtonUi();
+            return;
+          }
+        }
       } finally {
         previewModeState.suppressCapture = false;
       }
+      mode = 'styled';
+      previewModeState.mode = 'styled';
+      syncPreviewModeTabsUi();
     }
+
+    if (mode === 'edit' && openOrUpdateCodeEditor('edit')) {
+      return;
+    }
+
+    // Read-only Styled / Raw native Hermes preview
+    showCodeEditorHost(false);
+    if (typeof window.showPreview === 'function') window.showPreview('code');
+    var pc = document.getElementById('previewCode');
+    if (pc) {
+      delete pc.dataset.ckHighlighted;
+      pc.style.display = '';
+      pc.textContent = previewModeState.content || '';
+      pc.scrollTop = 0;
+      if (mode === 'styled' && previewModeState.content && previewModeState.content.length <= 400000) {
+        cockpitFallbackHighlight(pc, previewModeState.content);
+      }
+    }
+    syncSaveButtonUi();
+  }
+
+  function renderStyledContent(filePath, content) {
+    previewModeState.path = filePath || previewModeState.path;
+    previewModeState.content = content;
+    previewModeState.mode = 'styled';
+    syncPreviewModeTabsUi();
+    renderActiveMode();
+  }
+
+  window.cockpitSetPreviewMode = function(mode) {
+    if (previewModeState.content === null || previewModeState.binary) return;
+    if (window.cockpitEditor && typeof window.cockpitEditor.isEditable === 'function'
+        && window.cockpitEditor.isEditable()
+        && typeof window.cockpitEditor.getContent === 'function'
+        && previewModeState.editorBoundKey) {
+      previewModeState.content = window.cockpitEditor.getContent();
+    }
+    if (mode === 'preview' && getVisualPreviewKind(previewModeState.path)) {
+      previewModeState.mode = 'preview';
+    } else if (mode === 'edit' && !previewModeState.readOnly) {
+      previewModeState.mode = 'edit';
+    } else if (mode === 'raw') {
+      previewModeState.mode = 'raw';
+    } else {
+      previewModeState.mode = 'styled';
+    }
+    syncPreviewModeTabsUi();
+    renderActiveMode();
   };
 
   // Source/config/log files must be PREVIEWED, never handed to the browser as a download.
@@ -734,13 +964,12 @@ function buildPerfAndBridgeScript() {
       return;
     }
 
-    var isImg = typeof IMAGE_EXTS !== 'undefined' && IMAGE_EXTS.has(ext);
+    var isImg = (typeof IMAGE_EXTS !== 'undefined' && IMAGE_EXTS.has(ext)) && ext !== '.svg';
     var isPdf = typeof PDF_EXTS !== 'undefined' && PDF_EXTS.has(ext) || ext === '.pdf';
     var isAudio = typeof AUDIO_EXTS !== 'undefined' && AUDIO_EXTS.has(ext);
     var isVideo = typeof VIDEO_EXTS !== 'undefined' && VIDEO_EXTS.has(ext);
-    var isHtml = typeof HTML_EXTS !== 'undefined' && HTML_EXTS.has(ext);
 
-    if (isImg || isPdf || isAudio || isVideo || isHtml) {
+    if (isImg || isPdf || isAudio || isVideo) {
       wsNav.externalFile = absPath;
       var pa = document.getElementById('previewArea');
       var pt = document.getElementById('previewPathText');
@@ -753,7 +982,13 @@ function buildPerfAndBridgeScript() {
       if (pa) pa.classList.add('visible');
       previewModeState.path = absPath;
       previewModeState.content = null;
+      previewModeState.savedContent = null;
       previewModeState.mode = 'styled';
+      previewModeState.isExternal = true;
+      previewModeState.binary = false;
+      previewModeState.dirty = false;
+      previewModeState.editorBoundKey = '';
+      showCodeEditorHost(false);
       syncPreviewModeTabsUi();
 
       if (isPdf) {
@@ -783,13 +1018,6 @@ function buildPerfAndBridgeScript() {
           media.style.maxWidth = '100%';
           wrap.appendChild(media);
         }
-      } else if (isHtml) {
-        if (typeof window.showPreview === 'function') window.showPreview('html');
-        var htmlFrame = document.getElementById('previewHtmlIframe');
-        if (htmlFrame) {
-          htmlFrame.src = '';
-          htmlFrame.src = rawUrl;
-        }
       }
       syncWsNavButtons();
       return;
@@ -810,14 +1038,19 @@ function buildPerfAndBridgeScript() {
         if (pbb) pbb.textContent = 'binary';
         if (ftb) ftb.style.display = 'none';
         if (pab) pab.classList.add('visible');
+        showCodeEditorHost(false);
         if (typeof window.showPreview === 'function') window.showPreview('code');
         var pcb = document.getElementById('previewCode');
         if (pcb) {
-          pcb.textContent = 'Binary file (' + sizeKb + ' KB) — not shown as text. Use the Raw tab to open or download it.';
+          pcb.style.display = '';
+          pcb.textContent = 'Binary file (' + sizeKb + ' KB) — not shown as text. Use Download to open it.';
         }
         previewModeState.path = absPath;
-        previewModeState.content = '';
+        previewModeState.content = null;
+        previewModeState.savedContent = null;
+        previewModeState.binary = true;
         previewModeState.mode = 'styled';
+        previewModeState.editorBoundKey = '';
         syncPreviewModeTabsUi();
         return;
       }
@@ -835,16 +1068,21 @@ function buildPerfAndBridgeScript() {
       }
       if (ft) ft.style.display = 'none';
       if (pa) pa.classList.add('visible');
+      var visualKind = getVisualPreviewKind(resolvedPath);
       previewModeState.path = resolvedPath;
       previewModeState.content = content;
-      previewModeState.mode = 'styled';
+      previewModeState.savedContent = content;
+      previewModeState.isExternal = true;
+      previewModeState.readOnly = Boolean(data.truncated);
+      previewModeState.binary = false;
+      previewModeState.dirty = false;
+      previewModeState.justSaved = false;
+      previewModeState.rawUrl = rawUrl;
+      previewModeState.loadSeq += 1;
+      previewModeState.editorBoundKey = '';
+      previewModeState.mode = (visualKind === 'html' || visualKind === 'svg' || visualKind === 'md' || visualKind === 'csv') ? 'preview' : 'styled';
       syncPreviewModeTabsUi();
-      previewModeState.suppressCapture = true;
-      try {
-        renderStyledContent(resolvedPath, content);
-      } finally {
-        previewModeState.suppressCapture = false;
-      }
+      renderActiveMode();
       syncWsNavButtons();
     } catch (_) {}
   }
@@ -1158,11 +1396,44 @@ function buildPerfAndBridgeScript() {
       window.openFile = async function(path) {
         wsNav.externalFile = null;
         if (!wsNav.suppressClear) wsNav.forwardStack.length = 0;
+        var seq = previewModeState.loadSeq + 1;
+        previewModeState.loadSeq = seq;
         previewModeState.path = path || '';
         previewModeState.content = null;
+        previewModeState.savedContent = null;
         previewModeState.mode = 'styled';
+        previewModeState.isExternal = false;
+        previewModeState.readOnly = typeof window._workspacePathIsReadOnly === 'function' ? Boolean(window._workspacePathIsReadOnly(path)) : false;
+        previewModeState.dirty = false;
+        previewModeState.justSaved = false;
+        previewModeState.binary = false;
+        previewModeState.editorBoundKey = '';
+        showCodeEditorHost(false);
         syncPreviewModeTabsUi();
         var res = await origOpenFile.apply(this, arguments);
+        if (previewModeState.loadSeq === seq && previewModeState.content === null) {
+          var vkind = getVisualPreviewKind(path);
+          if (vkind === 'html' || vkind === 'svg') {
+            try {
+              var readRoute = typeof window._workspaceRouteForPath === 'function'
+                ? window._workspaceRouteForPath(path, 'read')
+                : ('/api/file/read?session_id=' + encodeURIComponent((getLegacyState().session || {}).session_id || '') + '&path=' + encodeURIComponent(path));
+              var r = await fetch(readRoute, { credentials: 'include' });
+              if (r.ok && previewModeState.loadSeq === seq) {
+                var fdata = await r.json();
+                if (fdata && !fdata.binary && typeof fdata.content === 'string') {
+                  previewModeState.path = path;
+                  previewModeState.content = fdata.content;
+                  previewModeState.savedContent = fdata.content;
+                  previewModeState.readOnly = previewModeState.readOnly || Boolean(fdata.truncated);
+                  previewModeState.mode = 'preview';
+                  syncPreviewModeTabsUi();
+                  renderActiveMode();
+                }
+              }
+            } catch (_) {}
+          }
+        }
         syncWsNavButtons();
         return res;
       };
@@ -1175,7 +1446,11 @@ function buildPerfAndBridgeScript() {
         if (!previewModeState.suppressCapture && data && typeof data.content === 'string') {
           previewModeState.path = (typeof _previewCurrentPath !== 'undefined' && _previewCurrentPath) || previewModeState.path;
           previewModeState.content = data.content;
-          previewModeState.mode = 'styled';
+          previewModeState.savedContent = data.content;
+          previewModeState.dirty = false;
+          previewModeState.editorBoundKey = '';
+          previewModeState.mode = 'preview';
+          showCodeEditorHost(false);
           syncPreviewModeTabsUi();
         }
         return origRenderMd.apply(this, arguments);
@@ -1190,7 +1465,10 @@ function buildPerfAndBridgeScript() {
           if (!previewModeState.suppressCapture && typeof content === 'string') {
             previewModeState.path = filePath || previewModeState.path;
             previewModeState.content = content;
-            previewModeState.mode = 'styled';
+            previewModeState.savedContent = content;
+            previewModeState.dirty = false;
+            previewModeState.editorBoundKey = '';
+            previewModeState.mode = fnName === 'renderCsvPreviewContent' ? 'preview' : 'styled';
             syncPreviewModeTabsUi();
           }
           // Avoid main-thread freeze from Prism regex highlighting on large or minified files (>64 KB or >8 KB single line)
@@ -1214,16 +1492,59 @@ function buildPerfAndBridgeScript() {
       }
     });
 
+    if (typeof window.updateEditBtn === 'function' && !window.updateEditBtn.__pmBridged) {
+      var origUpdateEditBtn = window.updateEditBtn;
+      window.updateEditBtn = function() {
+        var res = origUpdateEditBtn.apply(this, arguments);
+        syncSaveButtonUi();
+        return res;
+      };
+      window.updateEditBtn.__pmBridged = true;
+    }
+
+    if (typeof window.toggleEditMode === 'function' && !window.toggleEditMode.__pmBridged) {
+      var origToggleEdit = window.toggleEditMode;
+      window.toggleEditMode = async function() {
+        if (previewModeState.content !== null && !previewModeState.binary && !previewModeState.readOnly && window.cockpitEditor) {
+          return window.cockpitSaveCurrentFile();
+        }
+        return origToggleEdit.apply(this, arguments);
+      };
+      window.toggleEditMode.__pmBridged = true;
+    }
+
     if (typeof window.clearPreview === 'function' && !window.clearPreview.__pmBridged) {
       var origClearPreview = window.clearPreview;
       window.clearPreview = function() {
         previewModeState.path = '';
         previewModeState.content = null;
+        previewModeState.savedContent = null;
+        previewModeState.dirty = false;
+        previewModeState.justSaved = false;
+        previewModeState.binary = false;
+        previewModeState.editorBoundKey = '';
         previewModeState.mode = 'styled';
+        showCodeEditorHost(false);
+        if (window.cockpitEditor && typeof window.cockpitEditor.close === 'function') {
+          window.cockpitEditor.close();
+        }
         syncPreviewModeTabsUi();
         return origClearPreview.apply(this, arguments);
       };
       window.clearPreview.__pmBridged = true;
+    }
+
+    if (!window.__cockpitGlobalSaveBound) {
+      window.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 's' || e.key === 'S')) {
+          var pa = document.getElementById('previewArea');
+          if (pa && pa.classList.contains('visible') && previewModeState.content !== null && !previewModeState.binary && !previewModeState.readOnly) {
+            e.preventDefault();
+            void window.cockpitSaveCurrentFile();
+          }
+        }
+      });
+      window.__cockpitGlobalSaveBound = true;
     }
 
     syncBridgeSession();
@@ -1329,7 +1650,7 @@ function buildIndexHtml({ coreFileName, cssFileName, legacyHashes, bridgeFileNam
   const panelCssTag = panelCss
     ? `\n<link rel="stylesheet" href="static/v2/assets/${panelCss}">`
     : "";
-  const extraTabsStyle = `\n<style id="cockpit-extra-tabs-style">.app-titlebar{justify-content:space-between!important;padding:0 12px;gap:8px;}.app-titlebar-inner{justify-content:flex-start!important;flex:1 1 auto;min-width:0;}.app-titlebar-spacer{display:none!important;}.app-titlebar-rightpanel-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;flex-shrink:0;transition:background .15s,color .15s,border-color .15s;-webkit-app-region:no-drag;}.app-titlebar-rightpanel-btn:hover{background:var(--hover-bg);color:var(--text);}.app-titlebar-rightpanel-btn[aria-pressed="true"],html[data-workspace-panel="open"] .app-titlebar-rightpanel-btn{color:var(--accent-text,var(--text));background:var(--accent-bg,var(--surface-subtle));border-color:var(--border2,var(--border));}.workspace-panel-tabs{flex-wrap:wrap;}.workspace-panel-tab{white-space:nowrap;flex:1 0 auto;padding:4px 7px;font-size:11.5px;}.rightpanel:not([data-active-tab="files"]) .panel-header,.rightpanel:not([data-active-tab="files"]) .cockpit-live-edits{display:none!important;}.rightpanel[data-active-tab="cmd"] .breadcrumb-bar,.rightpanel[data-active-tab="cmd"] .file-tree,.rightpanel[data-active-tab="cmd"] #wsEmptyState,.rightpanel[data-active-tab="cmd"] .workspace-artifacts,.rightpanel[data-active-tab="cmd"] .workspace-todos,.rightpanel[data-active-tab="cmd"] .preview-area,.rightpanel[data-active-tab="browser"] .breadcrumb-bar,.rightpanel[data-active-tab="browser"] .file-tree,.rightpanel[data-active-tab="browser"] #wsEmptyState,.rightpanel[data-active-tab="browser"] .workspace-artifacts,.rightpanel[data-active-tab="browser"] .workspace-todos,.rightpanel[data-active-tab="browser"] .preview-area,.rightpanel[data-active-tab="findings"] .breadcrumb-bar,.rightpanel[data-active-tab="findings"] .file-tree,.rightpanel[data-active-tab="findings"] #wsEmptyState,.rightpanel[data-active-tab="findings"] .workspace-artifacts,.rightpanel[data-active-tab="findings"] .workspace-todos,.rightpanel[data-active-tab="findings"] .preview-area,.rightpanel[data-active-tab="proxy"] .breadcrumb-bar,.rightpanel[data-active-tab="proxy"] .file-tree,.rightpanel[data-active-tab="proxy"] #wsEmptyState,.rightpanel[data-active-tab="proxy"] .workspace-artifacts,.rightpanel[data-active-tab="proxy"] .workspace-todos,.rightpanel[data-active-tab="proxy"] .preview-area{display:none!important;}.rightpanel[data-active-tab="cmd"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="browser"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="findings"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="proxy"] #cockpit-extra-tabs-root{display:flex!important;}.rightpanel:not([data-active-tab="cmd"]):not([data-active-tab="browser"]):not([data-active-tab="findings"]):not([data-active-tab="proxy"]) #cockpit-extra-tabs-root{display:none!important;}.cockpit-live-edits{border-bottom:1px solid var(--border);background:var(--surface-subtle);flex-shrink:0;}.cockpit-live-edits-hdr{width:100%;display:flex;align-items:center;gap:6px;padding:6px 12px;border:0;background:transparent;color:var(--text);font-size:11px;font-weight:600;cursor:pointer;text-align:left;}.cockpit-live-edits-hdr:hover{background:var(--hover-bg);}.cockpit-live-dot{width:7px;height:7px;border-radius:50%;background:#10b981;flex-shrink:0;box-shadow:0 0 0 2px rgba(16,185,129,.22);}.cockpit-live-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.cockpit-live-count{font-size:10px;padding:1px 6px;border-radius:999px;background:var(--hover-bg);color:var(--muted);font-family:var(--font-mono);}.cockpit-live-chev{color:var(--muted);font-size:10px;}.cockpit-live-edits-list{max-height:132px;overflow-y:auto;border-top:1px solid var(--border);padding:4px;}.cockpit-live-edit-row{width:100%;display:flex;align-items:center;gap:6px;padding:4px 8px;border:0;border-radius:5px;background:transparent;color:var(--text);font-size:11px;cursor:pointer;text-align:left;}.cockpit-live-edit-row:hover{background:var(--hover-bg);}.cockpit-live-edit-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);}.cockpit-file-badge{margin-left:auto;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;font-family:var(--font-mono);letter-spacing:.03em;flex-shrink:0;}.cockpit-file-badge--new{background:rgba(16,185,129,.16);color:#10b981;}.cockpit-file-badge--mod{background:rgba(245,158,11,.16);color:#f59e0b;}.cockpit-file-badge--del{background:rgba(239,68,68,.16);color:#ef4444;}.cockpit-preview-mode-tabs{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--border);border-radius:6px;background:var(--surface-subtle);flex-shrink:0;}.cockpit-preview-mode-tabs[hidden]{display:none!important;}.cockpit-preview-mode-tab{border:0;background:transparent;color:var(--muted);font-size:11px;font-weight:500;padding:2px 8px;border-radius:4px;cursor:pointer;line-height:1.3;}.cockpit-preview-mode-tab:hover{color:var(--text);}.cockpit-preview-mode-tab.active{background:var(--surface);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.2);}#messages{overflow-anchor:auto;}#messages>.msg,#messages>.message,.chat-messages>.msg,.chat-messages>.message{content-visibility:auto;contain-intrinsic-size:auto 120px;}.app-titlebar-telemetry{display:inline-flex;align-items:center;gap:6px;margin-right:8px;flex-shrink:0;-webkit-app-region:no-drag;}.cktel{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border:1px solid var(--border,#333);border-radius:999px;background:var(--surface-subtle,rgba(255,255,255,.05));font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:10.5px;line-height:1.4;color:var(--muted,#8b8b8b);white-space:nowrap;}.cktel-k{font-weight:600;letter-spacing:.04em;opacity:.75;}.cktel-v{color:var(--text,inherit);font-variant-numeric:tabular-nums;}.cktel[data-level="warn"] .cktel-v{color:#f59e0b;}.cktel[data-level="hot"] .cktel-v{color:#ef4444;}@media(max-width:700px){.app-titlebar-telemetry{gap:3px;margin-right:4px;}.cktel{padding:1px 5px;font-size:9.5px;}.cktel-k{display:none;}}.ck-kw{color:#c792ea;}.ck-str{color:#c3e88d;}.ck-cmt{color:#7f8c98;font-style:italic;}.ck-num{color:#f78c6c;}#messages{overflow-anchor:none!important;}#btnEditFile{display:none!important;}.ck-undo{position:absolute;top:2px;right:6px;z-index:5;opacity:0;transition:opacity .12s;font-size:10px;padding:2px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--surface-subtle,rgba(255,255,255,.06));color:var(--muted,#9aa4ae);cursor:pointer;}.msg-row[data-role="user"]{position:relative;}.msg-row[data-role="user"]:hover .ck-undo{opacity:1;}.ck-undo:hover{color:#f87171;border-color:rgba(248,113,113,.5);}.ck-narr{margin:6px 0;padding:2px 0 2px 8px;border-left:2px solid rgba(52,211,153,.45);white-space:pre-wrap;word-break:break-word;font-size:12.5px;line-height:1.55;color:var(--text-secondary,#b9c2cc);}</style>`;
+  const extraTabsStyle = `\n<style id="cockpit-extra-tabs-style">.app-titlebar{justify-content:space-between!important;padding:0 12px;gap:8px;}.app-titlebar-inner{justify-content:flex-start!important;flex:1 1 auto;min-width:0;}.app-titlebar-spacer{display:none!important;}.app-titlebar-rightpanel-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;flex-shrink:0;transition:background .15s,color .15s,border-color .15s;-webkit-app-region:no-drag;}.app-titlebar-rightpanel-btn:hover{background:var(--hover-bg);color:var(--text);}.app-titlebar-rightpanel-btn[aria-pressed="true"],html[data-workspace-panel="open"] .app-titlebar-rightpanel-btn{color:var(--accent-text,var(--text));background:var(--accent-bg,var(--surface-subtle));border-color:var(--border2,var(--border));}.workspace-panel-tabs{flex-wrap:wrap;}.workspace-panel-tab{white-space:nowrap;flex:1 0 auto;padding:4px 7px;font-size:11.5px;}.rightpanel:not([data-active-tab="files"]) .panel-header,.rightpanel:not([data-active-tab="files"]) .cockpit-live-edits{display:none!important;}.rightpanel[data-active-tab="cmd"] .breadcrumb-bar,.rightpanel[data-active-tab="cmd"] .file-tree,.rightpanel[data-active-tab="cmd"] #wsEmptyState,.rightpanel[data-active-tab="cmd"] .workspace-artifacts,.rightpanel[data-active-tab="cmd"] .workspace-todos,.rightpanel[data-active-tab="cmd"] .preview-area,.rightpanel[data-active-tab="browser"] .breadcrumb-bar,.rightpanel[data-active-tab="browser"] .file-tree,.rightpanel[data-active-tab="browser"] #wsEmptyState,.rightpanel[data-active-tab="browser"] .workspace-artifacts,.rightpanel[data-active-tab="browser"] .workspace-todos,.rightpanel[data-active-tab="browser"] .preview-area,.rightpanel[data-active-tab="findings"] .breadcrumb-bar,.rightpanel[data-active-tab="findings"] .file-tree,.rightpanel[data-active-tab="findings"] #wsEmptyState,.rightpanel[data-active-tab="findings"] .workspace-artifacts,.rightpanel[data-active-tab="findings"] .workspace-todos,.rightpanel[data-active-tab="findings"] .preview-area,.rightpanel[data-active-tab="proxy"] .breadcrumb-bar,.rightpanel[data-active-tab="proxy"] .file-tree,.rightpanel[data-active-tab="proxy"] #wsEmptyState,.rightpanel[data-active-tab="proxy"] .workspace-artifacts,.rightpanel[data-active-tab="proxy"] .workspace-todos,.rightpanel[data-active-tab="proxy"] .preview-area{display:none!important;}.rightpanel[data-active-tab="cmd"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="browser"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="findings"] #cockpit-extra-tabs-root,.rightpanel[data-active-tab="proxy"] #cockpit-extra-tabs-root{display:flex!important;}.rightpanel:not([data-active-tab="cmd"]):not([data-active-tab="browser"]):not([data-active-tab="findings"]):not([data-active-tab="proxy"]) #cockpit-extra-tabs-root{display:none!important;}.cockpit-live-edits{border-bottom:1px solid var(--border);background:var(--surface-subtle);flex-shrink:0;}.cockpit-live-edits-hdr{width:100%;display:flex;align-items:center;gap:6px;padding:6px 12px;border:0;background:transparent;color:var(--text);font-size:11px;font-weight:600;cursor:pointer;text-align:left;}.cockpit-live-edits-hdr:hover{background:var(--hover-bg);}.cockpit-live-dot{width:7px;height:7px;border-radius:50%;background:#10b981;flex-shrink:0;box-shadow:0 0 0 2px rgba(16,185,129,.22);}.cockpit-live-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.cockpit-live-count{font-size:10px;padding:1px 6px;border-radius:999px;background:var(--hover-bg);color:var(--muted);font-family:var(--font-mono);}.cockpit-live-chev{color:var(--muted);font-size:10px;}.cockpit-live-edits-list{max-height:132px;overflow-y:auto;border-top:1px solid var(--border);padding:4px;}.cockpit-live-edit-row{width:100%;display:flex;align-items:center;gap:6px;padding:4px 8px;border:0;border-radius:5px;background:transparent;color:var(--text);font-size:11px;cursor:pointer;text-align:left;}.cockpit-live-edit-row:hover{background:var(--hover-bg);}.cockpit-live-edit-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);}.cockpit-file-badge{margin-left:auto;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;font-family:var(--font-mono);letter-spacing:.03em;flex-shrink:0;}.cockpit-file-badge--new{background:rgba(16,185,129,.16);color:#10b981;}.cockpit-file-badge--mod{background:rgba(245,158,11,.16);color:#f59e0b;}.cockpit-file-badge--del{background:rgba(239,68,68,.16);color:#ef4444;}.cockpit-preview-mode-tabs{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--border);border-radius:6px;background:var(--surface-subtle);flex-shrink:0;}.cockpit-preview-mode-tabs[hidden]{display:none!important;}.cockpit-preview-mode-tab{border:0;background:transparent;color:var(--muted);font-size:11px;font-weight:500;padding:2px 8px;border-radius:4px;cursor:pointer;line-height:1.3;}.cockpit-preview-mode-tab:hover{color:var(--text);}.cockpit-preview-mode-tab.active{background:var(--surface);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.2);}#messages{overflow-anchor:auto;}#messages>.msg,#messages>.message,.chat-messages>.msg,.chat-messages>.message{content-visibility:auto;contain-intrinsic-size:auto 120px;}.app-titlebar-telemetry{display:inline-flex;align-items:center;gap:6px;margin-right:8px;flex-shrink:0;-webkit-app-region:no-drag;}.cktel{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border:1px solid var(--border,#333);border-radius:999px;background:var(--surface-subtle,rgba(255,255,255,.05));font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:10.5px;line-height:1.4;color:var(--muted,#8b8b8b);white-space:nowrap;}.cktel-k{font-weight:600;letter-spacing:.04em;opacity:.75;}.cktel-v{color:var(--text,inherit);font-variant-numeric:tabular-nums;}.cktel[data-level="warn"] .cktel-v{color:#f59e0b;}.cktel[data-level="hot"] .cktel-v{color:#ef4444;}@media(max-width:700px){.app-titlebar-telemetry{gap:3px;margin-right:4px;}.cktel{padding:1px 5px;font-size:9.5px;}.cktel-k{display:none;}}.ck-kw{color:#c792ea;}.ck-str{color:#c3e88d;}.ck-cmt{color:#7f8c98;font-style:italic;}.ck-num{color:#f78c6c;}#messages{overflow-anchor:none!important;}.ck-undo{position:absolute;top:2px;right:6px;z-index:5;opacity:0;transition:opacity .12s;font-size:10px;padding:2px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--surface-subtle,rgba(255,255,255,.06));color:var(--muted,#9aa4ae);cursor:pointer;}.msg-row[data-role="user"]{position:relative;}.msg-row[data-role="user"]:hover .ck-undo{opacity:1;}.ck-undo:hover{color:#f87171;border-color:rgba(248,113,113,.5);}.ck-narr{margin:6px 0;padding:2px 0 2px 8px;border-left:2px solid rgba(52,211,153,.45);white-space:pre-wrap;word-break:break-word;font-size:12.5px;line-height:1.55;color:var(--text-secondary,#b9c2cc);}</style>`;
   html = html.replace(
     '<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">',
     `<link rel="stylesheet" href="static/v2/${cssFileName}?v=__WEBUI_VERSION__">${panelCssTag}${extraTabsStyle}`
@@ -1391,7 +1712,7 @@ $2`
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnWsForward" type="button" data-tooltip="Forward / previous visited" aria-label="Forward / previous visited" title="Go to previous visited file or folder" onclick="cockpitWsForward()" disabled><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></button>`
   );
 
-  // 4c. Add [Styled | Raw] tabs on the right of #previewPath
+  // 4c. Add [Styled | Raw | Preview] tabs on the right of #previewPath + CodeMirror host + fix #previewHtmlWrap height
   const previewPathRegex = /(<div class="preview-path" id="previewPath">[\s\S]*?)(<\/div>)/i;
   if (!previewPathRegex.test(html)) {
     throw new Error("Could not find #previewPath in static/index.html");
@@ -1400,9 +1721,19 @@ $2`
     previewPathRegex,
     `$1        <div id="cockpitPreviewModeTabs" class="cockpit-preview-mode-tabs" role="tablist" aria-label="Preview format" hidden>
           <button id="btnPreviewStyled" class="cockpit-preview-mode-tab active" type="button" role="tab" aria-selected="true" onclick="cockpitSetPreviewMode('styled')">Styled</button>
+          <button id="btnPreviewEdit" class="cockpit-preview-mode-tab" type="button" role="tab" aria-selected="false" onclick="cockpitSetPreviewMode('edit')" hidden>Edit</button>
           <button id="btnPreviewRaw" class="cockpit-preview-mode-tab" type="button" role="tab" aria-selected="false" onclick="cockpitSetPreviewMode('raw')">Raw</button>
+          <button id="btnPreviewVisual" class="cockpit-preview-mode-tab" type="button" role="tab" aria-selected="false" onclick="cockpitSetPreviewMode('preview')" hidden>Preview</button>
         </div>
       $2`
+  );
+  html = html.replace(
+    '<pre class="preview-code" id="previewCode"></pre>',
+    '<pre class="preview-code" id="previewCode"></pre>\n      <div id="cockpitCodeEditorHost" class="cockpit-code-editor-host" style="display:none;flex:1;min-height:0;overflow:hidden"></div>'
+  );
+  html = html.replace(
+    '<div class="preview-html-wrap" id="previewHtmlWrap" style="display:none;flex:1;border-radius:8px;overflow:hidden;border:1px solid var(--border2)">',
+    '<div class="preview-html-wrap" id="previewHtmlWrap" style="display:none;flex:1;min-height:280px;height:100%;border-radius:8px;overflow:hidden;border:1px solid var(--border2)">'
   );
 
   const rightPanelEndRegex = /(<aside class="rightpanel">[\s\S]*?)(<\/aside>)/i;
@@ -1490,8 +1821,27 @@ el.scrollTop=el.scrollHeight;})();</script>
       }
     });
   }
+  var seenBrowserTools = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+  var browserAutoOpened = false;
+  function checkLiveBrowserTool(){
+    var wl = document.querySelector('.live-worklog[data-live-worklog-shell="1"]');
+    if (!wl){ browserAutoOpened = false; return; }
+    var cards = wl.querySelectorAll('[data-tool-name], .tool-card-name, .wl-tool-name');
+    for (var i=0;i<cards.length;i++){
+      var el = cards[i];
+      if (seenBrowserTools && seenBrowserTools.has(el)) continue;
+      if (seenBrowserTools) seenBrowserTools.add(el);
+      var nm = (el.getAttribute('data-tool-name') || el.textContent || '').trim().toLowerCase();
+      if (nm.indexOf('browser_') === 0 && !browserAutoOpened){
+        browserAutoOpened = true;
+        if (typeof window.openWorkspacePanel === 'function') window.openWorkspacePanel();
+        if (typeof window.switchWorkspacePanelTab === 'function') window.switchWorkspacePanelTab('browser');
+        break;
+      }
+    }
+  }
   var pending=0;
-  function schedule(){ clearTimeout(pending); pending=setTimeout(settle,180); }
+  function schedule(){ clearTimeout(pending); pending=setTimeout(function(){ settle(); checkLiveBrowserTool(); },180); }
   new MutationObserver(schedule).observe(document.body,{childList:true,subtree:true,characterData:true});
   setInterval(settle,1500);
 })();</script>

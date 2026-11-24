@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from api.helpers import bad, j
+from api.helpers import bad, j, read_body
 from api.sse_chunked import end_sse_headers
 
 MAX_FILE_BYTES = 262_144  # 256 KB
@@ -607,6 +607,7 @@ def handle_fs_raw(handler, parsed) -> bool:
     qs = parse_qs(parsed.query)
     raw_path = (qs.get("path") or [""])[0].strip()
     download = (qs.get("download") or ["0"])[0] == "1"
+    inline = (qs.get("inline") or ["0"])[0] == "1"
     if not raw_path:
         bad(handler, "path is required", 400)
         return True
@@ -627,8 +628,14 @@ def handle_fs_raw(handler, parsed) -> bool:
     # text/x-python, application/json, etc. as downloads when navigated to directly,
     # so serve them as plain text and skip the filename disposition.
     suffix = target.suffix.lower()
-    text_like = suffix in _TEXT_LIKE_SUFFIXES or mime.startswith("text/")
-    if text_like:
+    html_inline = inline and not download and suffix in {".html", ".htm", ".xhtml"}
+    svg_inline = inline and not download and suffix == ".svg"
+    text_like = (suffix in _TEXT_LIKE_SUFFIXES or mime.startswith("text/")) and not html_inline and not svg_inline
+    if html_inline:
+        mime = "text/html; charset=utf-8"
+    elif svg_inline:
+        mime = "image/svg+xml"
+    elif text_like:
         mime = "text/plain; charset=utf-8"
     try:
         size = target.stat().st_size
@@ -680,6 +687,12 @@ def handle_fs_raw(handler, parsed) -> bool:
                     f'{disp}; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}',
                 )
             handler.send_header("Cache-Control", "no-store")
+            if html_inline or svg_inline:
+                handler.send_header(
+                    "Content-Security-Policy",
+                    "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+                )
+                handler.send_header("X-Content-Type-Options", "nosniff")
             handler.end_headers()
             remaining = length
             while remaining > 0:
@@ -692,4 +705,45 @@ def handle_fs_raw(handler, parsed) -> bool:
         pass
     except OSError as exc:
         bad(handler, f"Cannot read file: {exc}", 403)
+    return True
+
+
+def handle_fs_save(handler) -> bool:
+    """Save edited UTF-8 text content to a file opened via /api/cockpit/fs/read."""
+    try:
+        body = read_body(handler)
+    except ValueError as exc:
+        bad(handler, str(exc), 400)
+        return True
+    sid = str((body or {}).get("session_id") or "").strip()
+    raw_path = str((body or {}).get("path") or "").strip()
+    if not sid or not raw_path:
+        bad(handler, "session_id and path are required", 400)
+        return True
+    try:
+        resolve_session_workspace_root(sid)
+    except ValueError as exc:
+        bad(handler, str(exc), 400)
+        return True
+    except (KeyError, FileNotFoundError) as exc:
+        bad(handler, str(exc), 404)
+        return True
+
+    try:
+        raw_p = Path(raw_path)
+        if raw_p.is_symlink():
+            bad(handler, "Cannot save to a symlinked entry", 403)
+            return True
+        target = Path(os.path.realpath(raw_path))
+        if not target.exists():
+            bad(handler, "File not found", 404)
+            return True
+        if not target.is_file():
+            bad(handler, "Cannot save: path is not a file", 400)
+            return True
+        data = str((body or {}).get("content", "")).encode("utf-8")
+        target.write_bytes(data)
+        j(handler, {"ok": True, "path": str(target), "size": len(data)})
+    except OSError as exc:
+        bad(handler, f"Cannot save file: {exc}", 403)
     return True

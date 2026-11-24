@@ -186,3 +186,50 @@ def test_fs_list_and_read_allows_parent_navigation(tmp_path: Path, monkeypatch: 
     assert h6.status == 206
     h6.sent_headers["Content-Disposition"].encode("latin-1")
     assert "filename*=UTF-8''" in h6.sent_headers["Content-Disposition"]
+
+
+def test_fs_raw_inline_html_and_fs_save(tmp_path: Path, monkeypatch):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setattr(cockpit_files, "resolve_session_workspace_root", lambda sid: ws)
+
+    html_file = tmp_path / "page.html"
+    html_file.write_text("<h1>Hello</h1>", encoding="utf-8")
+
+    h1 = _FakeHandler()
+    assert cockpit_files.handle_fs_raw(
+        h1, urlparse(f"/api/cockpit/fs/raw?session_id=s1&path={html_file}&inline=1")
+    ) is True
+    assert h1.status == 200
+    assert h1.sent_headers.get("Content-Type") == "text/html; charset=utf-8"
+    assert "sandbox" in h1.sent_headers.get("Content-Security-Policy", "")
+    assert h1.wfile.getvalue() == b"<h1>Hello</h1>"
+
+    monkeypatch.setattr(
+        cockpit_files,
+        "read_body",
+        lambda _handler: {
+            "session_id": "s1",
+            "path": str(html_file),
+            "content": "<h1>Updated</h1>",
+        },
+    )
+    h2 = _FakeHandler()
+    assert cockpit_files.handle_fs_save(h2) is True
+    assert h2.status == 200
+    saved_resp = json.loads(h2.wfile.getvalue().decode("utf-8"))
+    assert saved_resp["ok"] is True
+    assert html_file.read_text(encoding="utf-8") == "<h1>Updated</h1>"
+
+    monkeypatch.setattr(
+        cockpit_files,
+        "read_body",
+        lambda _handler: {
+            "session_id": "s1",
+            "path": str(tmp_path / "missing.html"),
+            "content": "nope",
+        },
+    )
+    h3 = _FakeHandler()
+    assert cockpit_files.handle_fs_save(h3) is True
+    assert h3.status == 404

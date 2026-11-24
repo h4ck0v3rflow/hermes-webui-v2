@@ -398,28 +398,30 @@ def handle_browser_stream(handler, parsed) -> bool:
                             },
                         )
 
-                    # Frame (send on change only, cap ~400 KB)
-                    shot_res = _hp_browser_action(
-                        pid, bsid, {"type": "screenshot", "max_bytes": 400_000}
-                    )
-                    if isinstance(shot_res, dict):
-                        b64 = _extract_frame_b64(shot_res)
-                        if b64:
-                            digest = hashlib.sha256(b64.encode("ascii", errors="ignore")).hexdigest()
-                            if digest != last_frame_hash:
-                                last_frame_hash = digest
-                                frame_url = str(shot_res.get("url") or cur_url)
-                                _sse(
-                                    handler,
-                                    "browser",
-                                    {
-                                        "t": "frame",
-                                        "jpeg_b64": b64,
-                                        "mime_type": str(((shot_res.get("data") or {}) if isinstance(shot_res.get("data"), dict) else {}).get("mime_type") or "image/png"),
-                                        "url": frame_url,
-                                        "ts": time.time(),
-                                    },
-                                )
+                    # Frame (send on change only, cap ~400 KB). Skip while human holds live CDP
+                    # control — /api/cockpit/browser/live pushes JPEG deltas directly.
+                    if not paused:
+                        shot_res = _hp_browser_action(
+                            pid, bsid, {"type": "screenshot", "max_bytes": 400_000}
+                        )
+                        if isinstance(shot_res, dict):
+                            b64 = _extract_frame_b64(shot_res)
+                            if b64:
+                                digest = hashlib.sha256(b64.encode("ascii", errors="ignore")).hexdigest()
+                                if digest != last_frame_hash:
+                                    last_frame_hash = digest
+                                    frame_url = str(shot_res.get("url") or cur_url)
+                                    _sse(
+                                        handler,
+                                        "browser",
+                                        {
+                                            "t": "frame",
+                                            "jpeg_b64": b64,
+                                            "mime_type": str(((shot_res.get("data") or {}) if isinstance(shot_res.get("data"), dict) else {}).get("mime_type") or "image/png"),
+                                            "url": frame_url,
+                                            "ts": time.time(),
+                                        },
+                                    )
 
                     # Open tabs (pages) — HuntProxy replies {ok, data:{pages[], runtime_generation}}
                     pages_res = _hp_browser_action(pid, bsid, {"type": "pages", "op": "list"})
@@ -460,7 +462,12 @@ def handle_browser_stream(handler, parsed) -> bool:
                 if now - last_keepalive >= _SSE_HEARTBEAT_INTERVAL_SECONDS:
                     _sse_write(handler, b": keepalive\n\n")
                     last_keepalive = now
-                time.sleep(0.75)
+                poll_interval = 2.0 if (not bs or paused) else 0.75
+                try:
+                    local_payload = q.get(timeout=poll_interval)
+                    _sse(handler, "browser_state", local_payload)
+                except queue.Empty:
+                    pass
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, OSError):
         pass
     finally:
@@ -681,8 +688,28 @@ def handle_browser_action(handler) -> bool:
             if holder:
                 _hp_browser_cdp(pid, str(holder), "disable")
 
-    bs = _hp_ensure_browser_session(pid, prof)
+    sub_op = str(body.get("op") or "").strip().lower()
+    should_spawn = (
+        action == "navigate"
+        or (action == "pages" and sub_op == "open")
+        or (action == "cdp" and sub_op == "enable")
+    )
+    bs = (
+        _hp_ensure_browser_session(pid, prof)
+        if should_spawn
+        else _hp_get_active_browser_session(pid, prof)
+    )
     bsid = str((bs or {}).get("id") or (bs or {}).get("browser_session_id") or "")
+    if not bs and not should_spawn and action != "cdp":
+        j(
+            handler,
+            {
+                "ok": False,
+                "no_browser": True,
+                "message": "Agent has not opened a browser yet",
+            },
+        )
+        return True
 
     if action == "cdp":
         from api.cockpit import cdp as cdpmod
